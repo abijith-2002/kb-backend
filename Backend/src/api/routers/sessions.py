@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import create_client
 import os
 
@@ -126,6 +126,97 @@ def list_session_files(session_id: str, user=Depends(get_current_user)):
             }
         )
     return {"items": items}
+
+# PUBLIC_INTERFACE
+@router.delete(
+    "/{session_id}/files",
+    summary="Unpin a file from a session",
+    description="Unpin a file from the specified session by setting files.session_id = null. The caller must own both the session and the file.",
+)
+def unpin_session_file(
+    session_id: str,
+    file_id: str = Query(..., description="ID of the file to unpin from the session"),
+    user=Depends(get_current_user),
+):
+    """
+    Unpin a file from a session (set files.session_id = null).
+
+    Authorization and behavior:
+    - Requires authentication.
+    - The session must exist and be owned by the current user; otherwise 403/404.
+    - The file must exist and be owned by the current user; otherwise 403/404.
+    - If the file is not currently pinned to the specified session, returns 404.
+    - On success, clears the session_id of the file and returns {"success": True, "id": <file_id>}.
+
+    Errors:
+    - 401: Not authenticated
+    - 403: Forbidden (session or file not owned)
+    - 404: Session or file not found, or file not pinned to this session
+    - 500: Backend failure during update
+    """
+    sb = get_supabase()
+
+    # Verify session ownership
+    try:
+        s_resp = (
+            sb.table("sessions")
+            .select("id,user_id")
+            .eq("id", session_id)
+            .single()
+            .execute()
+        )
+        s_row = getattr(s_resp, "data", None)
+    except Exception:
+        s_row = None
+
+    if not s_row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if s_row.get("user_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Forbidden: session is not owned by user")
+
+    # Verify file ownership and current pin to this session
+    try:
+        f_resp = (
+            sb.table("files")
+            .select("id,user_id,session_id")
+            .eq("id", file_id)
+            .single()
+            .execute()
+        )
+        f_row = getattr(f_resp, "data", None)
+    except Exception:
+        f_row = None
+
+    if not f_row:
+        raise HTTPException(status_code=404, detail="File not found")
+    if f_row.get("user_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Forbidden: file is not owned by user")
+    if f_row.get("session_id") != session_id:
+        # The file is either unpinned or pinned to another session
+        raise HTTPException(status_code=404, detail="File not attached to this session")
+
+    # Perform unpin: set session_id = null
+    try:
+        upd = (
+            sb.table("files")
+            .update({"session_id": None})
+            .eq("id", file_id)
+            .eq("user_id", user["id"])
+            .eq("session_id", session_id)
+            .select("id")
+            .single()
+            .execute()
+        )
+        updated = getattr(upd, "data", None)
+        if not updated:
+            # Could happen if RLS or conditions didn't match
+            raise HTTPException(status_code=404, detail="File not attached to this session")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to unpin file: {e}")
+
+    return {"success": True, "id": file_id}
 
 # PUBLIC_INTERFACE
 @router.patch("/{session_id}", response_model=Session, summary="Update session", description="Update a session's title (must belong to current user).")
