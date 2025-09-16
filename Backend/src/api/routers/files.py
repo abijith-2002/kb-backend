@@ -308,6 +308,82 @@ async def upload_file(
     )
 
 # PUBLIC_INTERFACE
-@router.delete("/{file_id}", summary="Delete file (stub)", description="Protected stub endpoint for deleting a file.")
+@router.delete(
+    "/{file_id}",
+    summary="Delete file",
+    description="Delete a file if owned by the requesting user. Removes object from Supabase Storage and deletes the DB row.",
+)
 def delete_file(file_id: str, user=Depends(get_current_user)):
-    return {"success": True, "note": f"Delete stub for {file_id}. To be implemented."}
+    """
+    Delete a file owned by the current user.
+
+    Steps:
+    - Validate authentication
+    - Fetch file row (RLS + explicit user_id check). If not found, return 404.
+    - Parse storage_path to get bucket and key, then delete object from Storage.
+    - Remove the row from DB (RLS enforced).
+    - Return success payload.
+
+    Errors:
+    - 401: not authenticated
+    - 403: forbidden if row exists but not owned (we explicitly check and return 403)
+    - 404: file not found
+    - 500: storage/DB deletion errors
+    """
+    if not user or "id" not in user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    sb = _get_supabase()
+    user_id = user["id"]
+
+    # First try to fetch the row with explicit ownership check
+    try:
+        resp = (
+            sb.table("files")
+            .select("*")
+            .eq("id", file_id)
+            .eq("user_id", user_id)
+            .single()
+            .execute()
+        )
+        row = getattr(resp, "data", None)
+    except Exception:
+        row = None
+
+    if not row:
+        # Determine if file exists but is not owned by the user
+        try:
+            resp_any = sb.table("files").select("id,user_id").eq("id", file_id).single().execute()
+            any_row = getattr(resp_any, "data", None)
+        except Exception:
+            any_row = None
+
+        if any_row is not None and any_row.get("user_id") != user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: file is not owned by user")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    storage_path = row.get("storage_path") or ""
+    if "/" not in storage_path:
+        # Expect format "<bucket>/<key...>"
+        raise HTTPException(status_code=500, detail="Invalid storage path in DB")
+
+    # Extract bucket and object key
+    bucket, key = storage_path.split("/", 1)
+
+    # Attempt to delete from storage first
+    try:
+        # Best-effort: if the bucket/object does not exist, ignore errors from remove
+        sb.storage.from_(bucket).remove([key])
+    except Exception:
+        # We won't fail the whole operation for storage cleanup failures by default,
+        # but in strict mode we could raise. Here we proceed to DB delete to avoid orphan rows.
+        pass
+
+    # Delete the DB row (RLS ensures user_id == auth.uid())
+    try:
+        sb.table("files").delete().eq("id", file_id).eq("user_id", user_id).execute()
+    except Exception as e:
+        # Optionally: attempt to restore storage if DB delete fails (not implemented).
+        raise HTTPException(status_code=500, detail=f"Failed to delete file record: {e}")
+
+    return {"success": True, "id": file_id}
