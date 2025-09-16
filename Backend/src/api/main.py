@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,17 +21,20 @@ def get_cors_origins() -> List[str]:
         return ["*"]
     return [o.strip() for o in origins.split(",") if o.strip()]
 
-def init_supabase() -> Client:
-    """Initialize a Supabase client to verify configuration at startup."""
+def init_supabase() -> Optional[Client]:
+    """Initialize a Supabase client to verify configuration at startup.
+
+    Reads SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY if available).
+    """
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not url or not key:
-        # Lazy fail: allow app to start but log missing config; endpoints will error clearly
-        return None  # type: ignore
+        # Lazy fail: allow app to start; endpoints using Supabase will error clearly with guidance.
+        return None
     try:
         return create_client(url, key)
     except Exception:
-        return None  # type: ignore
+        return None
 
 app = FastAPI(
     title="KnowledgeBot Backend",

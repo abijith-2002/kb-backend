@@ -9,10 +9,13 @@ from ..deps import get_current_user
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 def get_supabase() -> Client:
+    """Create Supabase client for auth routes using SUPABASE_URL and key(s)."""
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not url or not key:
-        raise RuntimeError("Supabase configuration missing. Ensure SUPABASE_URL and keys are set.")
+        raise RuntimeError(
+            "Supabase configuration missing. Ensure SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY) are set."
+        )
     return create_client(url, key)
 
 # PUBLIC_INTERFACE

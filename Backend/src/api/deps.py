@@ -9,11 +9,19 @@ from supabase import create_client, Client
 security = HTTPBearer(auto_error=False)
 
 def get_supabase() -> Client:
-    """Create a Supabase client using env variables."""
+    """Create a Supabase client using env variables.
+
+    Reads:
+    - SUPABASE_URL
+    - SUPABASE_SERVICE_ROLE_KEY (preferred for server-side operations) or SUPABASE_ANON_KEY (fallback)
+    """
     url = os.getenv("SUPABASE_URL")
+    # Prefer service role on the server, fall back to anon key for read-only/basic flows
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not url or not key:
-        raise RuntimeError("Supabase configuration missing. Ensure SUPABASE_URL and keys are set.")
+        raise RuntimeError(
+            "Supabase configuration missing. Ensure SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY) are set."
+        )
     return create_client(url, key)
 
 # PUBLIC_INTERFACE
