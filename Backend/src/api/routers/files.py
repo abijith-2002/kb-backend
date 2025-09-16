@@ -2,7 +2,7 @@ import os
 import re
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from starlette.responses import JSONResponse
@@ -10,27 +10,47 @@ from supabase import create_client, Client
 
 from ..deps import get_current_user
 
-router = APIRouter(prefix="/files", tags=["Files"])
+router = APIRouter(
+    prefix="/files",
+    tags=["Files"],
+)
 
-# Internal helpers
-_ALLOWED_EXTS = {".pdf", ".docx", ".txt", ".xlsx"}
-_MIME_WHITELIST = {
+# Constants: allowed extensions and MIME types
+# Keep these in sync with the OpenAPI description.
+ALLOWED_FILE_EXTENSIONS = {".pdf", ".docx", ".txt", ".xlsx"}
+ALLOWED_MIME_TYPES = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
     "text/plain",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
+    # Some clients may send generic octet-stream; we allow it and rely on extension validation.
+    "application/octet-stream",
 }
-_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+DEFAULT_MAX_FILE_MB = 20  # fallback if env is missing or invalid
+ENV_MAX_FILE_MB = "FILES_MAX_SIZE_MB"
+ENV_STORAGE_BUCKET = "STORAGE_BUCKET"
+ENV_SUPABASE_URL = "SUPABASE_URL"
+ENV_SUPABASE_SERVICE_ROLE_KEY = "SUPABASE_SERVICE_ROLE_KEY"
+ENV_SUPABASE_ANON_KEY = "SUPABASE_ANON_KEY"
+
+
+def _json_error(status_code: int, msg: str) -> JSONResponse:
+    """Helper to return a consistent JSON error response body."""
+    return JSONResponse(status_code=status_code, content={"detail": msg})
 
 
 def _get_supabase() -> Client:
     """Create a Supabase client using env configuration."""
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    url = os.getenv(ENV_SUPABASE_URL)
+    key = os.getenv(ENV_SUPABASE_SERVICE_ROLE_KEY) or os.getenv(ENV_SUPABASE_ANON_KEY)
     if not url or not key:
-        raise RuntimeError(
-            "Supabase configuration missing. Ensure SUPABASE_URL and SUPABASE_ANON_KEY "
-            "(or SUPABASE_SERVICE_ROLE_KEY) are set."
+        # This is a server misconfiguration; return 500 consistently.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Supabase configuration missing. Ensure SUPABASE_URL and SUPABASE_ANON_KEY "
+            "(or SUPABASE_SERVICE_ROLE_KEY) are set.",
         )
     return create_client(url, key)
 
@@ -38,81 +58,99 @@ def _get_supabase() -> Client:
 def _max_size_bytes() -> int:
     """Return max file size in bytes determined by env FILES_MAX_SIZE_MB (default 20MB)."""
     try:
-        mb = int(os.getenv("FILES_MAX_SIZE_MB", "20"))
+        mb = int(os.getenv(ENV_MAX_FILE_MB, str(DEFAULT_MAX_FILE_MB)))
         if mb <= 0:
-            mb = 20
+            mb = DEFAULT_MAX_FILE_MB
     except Exception:
-        mb = 20
+        mb = DEFAULT_MAX_FILE_MB
     return mb * 1024 * 1024
 
 
 def _get_storage_bucket() -> str:
-    bucket = os.getenv("STORAGE_BUCKET", "").strip()
-    if not bucket:
-        # default bucket name if not provided; recommend configuring via env
-        bucket = "uploads"
-    return bucket
+    """Resolve storage bucket name from environment; default to 'uploads' if unset."""
+    bucket = os.getenv(ENV_STORAGE_BUCKET, "").strip()
+    return bucket or "uploads"
 
 
 def _secure_filename(filename: str) -> str:
-    """Sanitize filename to prevent path traversal and unsafe chars."""
-    # Extract only the base name to avoid directories
-    base = os.path.basename(filename)
-    # Replace spaces and strip unsafe characters
+    """Sanitize filename to prevent path traversal and unsafe characters."""
+    base = os.path.basename(filename or "")
     base = base.replace(" ", "_")
-    base = _SAFE_NAME_RE.sub("_", base)
-    # Ensure not empty
-    return base or "file"
+    base = SAFE_NAME_RE.sub("_", base)
+    # avoid empty names and limit length for safety
+    base = base or "file"
+    if len(base) > 255:
+        base = base[:255]
+    return base
 
 
 def _ext_of(name: str) -> str:
-    name_lower = name.lower()
-    for ext in _ALLOWED_EXTS:
-        if name_lower.endswith(ext):
-            return ext
-    return os.path.splitext(name_lower)[1]
+    """Return lowercase extension (including dot)."""
+    name_lower = (name or "").lower()
+    # trust typical last-dot extension
+    _, ext = os.path.splitext(name_lower)
+    return ext
 
 
-def _validate_extension_and_mime(filename: str, content_type: Optional[str]):
+def _validate_extension_and_mime(filename: str, content_type: Optional[str]) -> None:
+    """Enforce extension and MIME whitelist.
+
+    - extension MUST be in ALLOWED_FILE_EXTENSIONS
+    - MIME type SHOULD be in ALLOWED_MIME_TYPES (octet-stream is allowed as generic)
+    """
     ext = _ext_of(filename)
-    if ext not in _ALLOWED_EXTS:
+    if ext not in ALLOWED_FILE_EXTENSIONS:
+        allowed = ", ".join(sorted(ALLOWED_FILE_EXTENSIONS))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file extension. Allowed: {', '.join(sorted(_ALLOWED_EXTS))}",
+            detail=f"Unsupported file extension. Allowed: {allowed}",
         )
-    # Accept if client mime is in whitelist. If client provided nothing, we accept based on ext.
-    if content_type and content_type not in _MIME_WHITELIST:
-        # Some clients may send generic 'application/octet-stream'; allow that if extension is valid.
-        if content_type != "application/octet-stream":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported MIME type.",
-            )
+    if content_type and content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported MIME type.",
+        )
 
 
-def _validate_session_ownership(sb: Client, session_id: str, user_id: str):
-    # Query sessions table with RLS protection (and service/anon key). Double-check ownership via filter.
-    resp = (
-        sb.table("sessions")
-        .select("id,user_id")
-        .eq("id", session_id)
-        .eq("user_id", user_id)
-        .single()
-        .execute()
-    )
-    data = getattr(resp, "data", None)
-    if not data:
-        # Determine if session exists but is not owned, or does not exist.
-        # Try to see if session exists at all (without user filter) using service role if available.
-        try:
-            resp_any = sb.table("sessions").select("id").eq("id", session_id).single().execute()
-            exists_any = getattr(resp_any, "data", None) is not None
-        except Exception:
-            exists_any = False
-        if exists_any:
-            # Exists but not owned
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: session is not owned by user")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+def _validate_session_ownership(sb: Client, session_id: str, user_id: str) -> None:
+    """Verify that the session exists and is owned by the user; raise 403/404 appropriately."""
+    try:
+        owned = (
+            sb.table("sessions")
+            .select("id,user_id")
+            .eq("id", session_id)
+            .eq("user_id", user_id)
+            .single()
+            .execute()
+        )
+        if getattr(owned, "data", None):
+            return
+    except Exception:
+        pass
+
+    # Does the session exist at all?
+    try:
+        any_resp = sb.table("sessions").select("id,user_id").eq("id", session_id).single().execute()
+        any_row = getattr(any_resp, "data", None)
+    except Exception:
+        any_row = None
+
+    if any_row is not None and any_row.get("user_id") != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: session is not owned by user")
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+
+def _shape_file_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize DB file row to API response shape."""
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "storage_path": row.get("storage_path"),
+        "type": row.get("mime_type"),
+        "size": row.get("size"),
+        "session_id": row.get("session_id"),
+        "created_at": row.get("created_at"),
+    }
 
 
 # PUBLIC_INTERFACE
@@ -125,26 +163,22 @@ def list_files(
     session_id: Optional[str] = None,
     user=Depends(get_current_user),
 ):
-    """
-    List files for the current user.
+    """List files for the current user.
 
     - If session_id is provided, validates that the session exists and is owned by the current user.
     - Applies Row Level Security (RLS) via Supabase; only files with user_id == auth.uid() are returned.
-    - Returns a list of file metadata with fields:
-        id, name, storage_path, mime_type, size, session_id, created_at
+    - Returns a standardized JSON response: {'items': [...]}.
 
     Errors:
-    - 400: invalid input
-    - 401: not authenticated
-    - 403/404: session forbidden/not found (when session_id is provided)
-    - 500: backend failure
+    - 401: Not authenticated
+    - 403/404: Session forbidden/not found (when session_id is provided)
+    - 500: Backend failure
     """
     if not user or "id" not in user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
     sb = _get_supabase()
 
-    # If filtering by session, ensure the session is owned by the user
     if session_id:
         _validate_session_ownership(sb, session_id, user["id"])
 
@@ -155,27 +189,12 @@ def list_files(
         resp = query.execute()
         rows = getattr(resp, "data", []) or []
     except HTTPException:
-        # Propagate known HTTP errors
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list files: {e}")
 
-    # Shape response items
-    items = []
-    for r in rows:
-        items.append(
-            {
-                "id": r.get("id"),
-                "name": r.get("name"),
-                "storage_path": r.get("storage_path"),
-                "type": r.get("mime_type"),
-                "size": r.get("size"),
-                "session_id": r.get("session_id"),
-                "created_at": r.get("created_at"),
-            }
-        )
+    return {"items": [_shape_file_row(r) for r in rows]}
 
-    return {"items": items}
 
 # PUBLIC_INTERFACE
 @router.post(
@@ -183,7 +202,7 @@ def list_files(
     summary="Upload file",
     description=(
         "Authenticated file upload endpoint accepting multipart/form-data for .pdf, .docx, .txt, .xlsx. "
-        "Validates size and type, stores in Supabase Storage, and persists metadata in DB. "
+        "Validates size and type, sanitizes filename, stores in Supabase Storage, and persists metadata in DB. "
         "Optional session_id associates the file to a session if owned by the user."
     ),
 )
@@ -195,47 +214,40 @@ async def upload_file(
         description="Optional session ID this file should be associated with (must belong to current user).",
     ),
 ):
-    """
-    Upload a file to Supabase Storage and persist metadata to the database.
+    """Upload a file to Supabase Storage and persist metadata to the database.
 
-    - Accepts multipart/form-data with fields:
-      - file: UploadFile (.pdf, .docx, .txt, .xlsx only)
-      - session_id: optional session to link to; validated for ownership
-    - Enforces max file size via env FILES_MAX_SIZE_MB (default 20MB)
-    - Validates extension and MIME, secures filename, and prevents path traversal
-    - Stores binary in Supabase Storage at {user_id}/{YYYY-MM-DD}/{uuid}-{filename}
-    - Inserts metadata row to public.files with RLS applied
-    - Returns created metadata record
+    Security and validation:
+    - Auth required via Bearer token.
+    - Allowed extensions: .pdf, .docx, .txt, .xlsx
+    - Allowed MIME: application/pdf, text/plain, docx/xlsx official, application/octet-stream
+    - Max size: FILES_MAX_SIZE_MB (default 20MB) -> returns 413 on overflow.
+    - Filenames are sanitized for storage.
 
-    Errors:
-    - 400: invalid file/type
-    - 401: not authenticated
-    - 403/404: session ownership/not found
-    - 413: file too large
-    - 500: storage/DB failures
+    Returns:
+    - 200 with JSON metadata on success.
+    - 400/401/403/404/413/500 JSON error body with {"detail": "..."}.
     """
     if not user or "id" not in user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    user_id = user["id"]
     if not file or not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No file provided")
 
     safe_name = _secure_filename(file.filename)
     _validate_extension_and_mime(safe_name, file.content_type)
 
-    # Check session ownership if provided
     sb = _get_supabase()
-    if session_id:
-        _validate_session_ownership(sb, session_id, user_id)
 
-    # Enforce size by reading the stream in chunks and counting bytes
+    if session_id:
+        _validate_session_ownership(sb, session_id, user["id"])
+
+    # Stream read and enforce max size
     max_bytes = _max_size_bytes()
-    data_chunks = []
     total = 0
+    chunks: list[bytes] = []
     try:
         while True:
-            chunk = await file.read(1024 * 1024)  # 1MB chunks
+            chunk = await file.read(1024 * 1024)  # 1MB
             if not chunk:
                 break
             total += len(chunk)
@@ -244,68 +256,55 @@ async def upload_file(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     detail=f"File too large. Max {max_bytes // (1024 * 1024)} MB",
                 )
-            data_chunks.append(chunk)
+            chunks.append(chunk)
     finally:
-        await file.close()
+        try:
+            await file.close()
+        except Exception:
+            pass
 
-    binary = b"".join(data_chunks)
+    binary = b"".join(chunks)
 
-    # Build storage path
+    # Build storage path: {user_id}/{YYYY-MM-DD}/{uuid}-{filename}
     today = datetime.utcnow().strftime("%Y-%m-%d")
     unique = str(uuid.uuid4())
-    storage_key = f"{user_id}/{today}/{unique}-{safe_name}"
-
+    object_key = f"{user['id']}/{today}/{unique}-{safe_name}"
     bucket = _get_storage_bucket()
 
-    # Upload to Supabase Storage
+    # Upload
     try:
-        # Create bucket if it does not exist (best-effort; ignore errors if already exists)
         try:
+            # Best-effort bucket creation; if exists, it will raise, which we ignore.
             sb.storage.create_bucket(bucket)
         except Exception:
             pass
 
-        # Upload the file
-        # Set content_type if provided; otherwise let storage infer or set generic
-        content_type = file.content_type or "application/octet-stream"
-        sb.storage.from_(bucket).upload(path=storage_key, file=binary, file_options={"contentType": content_type})
+        ct = file.content_type or "application/octet-stream"
+        sb.storage.from_(bucket).upload(path=object_key, file=binary, file_options={"contentType": ct})
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Storage upload failed: {e}")
 
-    # Insert metadata into DB
+    # Persist metadata
     try:
-        insert_payload = {
-            "user_id": user_id,
+        payload = {
+            "user_id": user["id"],
             "session_id": session_id,
             "name": safe_name,
-            "storage_path": f"{bucket}/{storage_key}",
+            "storage_path": f"{bucket}/{object_key}",
             "mime_type": file.content_type,
             "size": total,
         }
-        resp = sb.table("files").insert(insert_payload).select("*").single().execute()
-        row = getattr(resp, "data", None)
+        inserted = sb.table("files").insert(payload).select("*").single().execute()
+        row = getattr(inserted, "data", None)
         if not row:
-            # rollback storage? For now, return 500 with guidance
-            raise HTTPException(status_code=500, detail="Failed to persist file metadata")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to persist file metadata")
     except HTTPException:
-        # Bubble up
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to persist file metadata: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to persist file metadata: {e}")
 
-    # Standard JSON response with metadata
-    return JSONResponse(
-        status_code=status.HTTP_200_OK,
-        content={
-            "id": row["id"],
-            "name": row["name"],
-            "type": row.get("mime_type"),
-            "storage_path": row["storage_path"],
-            "session_id": row.get("session_id"),
-            "size": row.get("size"),
-            "created_at": row.get("created_at"),
-        },
-    )
+    return JSONResponse(status_code=status.HTTP_200_OK, content=_shape_file_row(row))
+
 
 # PUBLIC_INTERFACE
 @router.delete(
@@ -314,76 +313,58 @@ async def upload_file(
     description="Delete a file if owned by the requesting user. Removes object from Supabase Storage and deletes the DB row.",
 )
 def delete_file(file_id: str, user=Depends(get_current_user)):
-    """
-    Delete a file owned by the current user.
+    """Delete a file owned by the current user with storage cleanup.
 
-    Steps:
-    - Validate authentication
-    - Fetch file row (RLS + explicit user_id check). If not found, return 404.
-    - Parse storage_path to get bucket and key, then delete object from Storage.
-    - Remove the row from DB (RLS enforced).
-    - Return success payload.
+    Behavior:
+    - Fetch file row by id with explicit user_id=auth.uid(); if not found, check if exists but not owned (return 403), else 404.
+    - Attempt to remove object from Supabase Storage using storage_path ("<bucket>/<key>").
+    - Delete DB row (RLS enforces ownership).
+    - Return JSON {success: true, id}.
 
-    Errors:
-    - 401: not authenticated
-    - 403: forbidden if row exists but not owned (we explicitly check and return 403)
-    - 404: file not found
-    - 500: storage/DB deletion errors
+    Errors: 401, 403, 404, 500 with JSON {"detail": "..."}.
     """
     if not user or "id" not in user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
     sb = _get_supabase()
-    user_id = user["id"]
+    uid = user["id"]
 
-    # First try to fetch the row with explicit ownership check
+    # Fetch file owned by user
     try:
-        resp = (
-            sb.table("files")
-            .select("*")
-            .eq("id", file_id)
-            .eq("user_id", user_id)
-            .single()
-            .execute()
-        )
-        row = getattr(resp, "data", None)
+        owned = sb.table("files").select("*").eq("id", file_id).eq("user_id", uid).single().execute()
+        row = getattr(owned, "data", None)
     except Exception:
         row = None
 
     if not row:
-        # Determine if file exists but is not owned by the user
+        # does it exist but belong to someone else?
         try:
-            resp_any = sb.table("files").select("id,user_id").eq("id", file_id).single().execute()
-            any_row = getattr(resp_any, "data", None)
+            any_row_resp = sb.table("files").select("id,user_id").eq("id", file_id).single().execute()
+            any_row = getattr(any_row_resp, "data", None)
         except Exception:
             any_row = None
 
-        if any_row is not None and any_row.get("user_id") != user_id:
+        if any_row is not None and any_row.get("user_id") != uid:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: file is not owned by user")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
-    storage_path = row.get("storage_path") or ""
+    storage_path = (row.get("storage_path") or "").strip()
     if "/" not in storage_path:
-        # Expect format "<bucket>/<key...>"
-        raise HTTPException(status_code=500, detail="Invalid storage path in DB")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Invalid storage path in DB")
 
-    # Extract bucket and object key
     bucket, key = storage_path.split("/", 1)
 
-    # Attempt to delete from storage first
+    # Remove from storage (best-effort)
     try:
-        # Best-effort: if the bucket/object does not exist, ignore errors from remove
         sb.storage.from_(bucket).remove([key])
     except Exception:
-        # We won't fail the whole operation for storage cleanup failures by default,
-        # but in strict mode we could raise. Here we proceed to DB delete to avoid orphan rows.
+        # do not fail delete if storage cleanup fails
         pass
 
-    # Delete the DB row (RLS ensures user_id == auth.uid())
+    # Delete DB row
     try:
-        sb.table("files").delete().eq("id", file_id).eq("user_id", user_id).execute()
+        sb.table("files").delete().eq("id", file_id).eq("user_id", uid).execute()
     except Exception as e:
-        # Optionally: attempt to restore storage if DB delete fails (not implemented).
-        raise HTTPException(status_code=500, detail=f"Failed to delete file record: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete file record: {e}")
 
     return {"success": True, "id": file_id}
