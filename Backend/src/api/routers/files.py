@@ -116,9 +116,66 @@ def _validate_session_ownership(sb: Client, session_id: str, user_id: str):
 
 
 # PUBLIC_INTERFACE
-@router.get("", summary="List files (stub)", description="Protected stub endpoint for listing files.")
-def list_files(user=Depends(get_current_user)):
-    return {"items": [], "note": "Files endpoints are stubs. To be implemented."}
+@router.get(
+    "",
+    summary="List files",
+    description="List files owned by the current authenticated user. Optionally filter by session_id. Enforces RLS and session ownership.",
+)
+def list_files(
+    session_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    """
+    List files for the current user.
+
+    - If session_id is provided, validates that the session exists and is owned by the current user.
+    - Applies Row Level Security (RLS) via Supabase; only files with user_id == auth.uid() are returned.
+    - Returns a list of file metadata with fields:
+        id, name, storage_path, mime_type, size, session_id, created_at
+
+    Errors:
+    - 400: invalid input
+    - 401: not authenticated
+    - 403/404: session forbidden/not found (when session_id is provided)
+    - 500: backend failure
+    """
+    if not user or "id" not in user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    sb = _get_supabase()
+
+    # If filtering by session, ensure the session is owned by the user
+    if session_id:
+        _validate_session_ownership(sb, session_id, user["id"])
+
+    try:
+        query = sb.table("files").select("*").eq("user_id", user["id"]).order("created_at", desc=True)
+        if session_id:
+            query = query.eq("session_id", session_id)
+        resp = query.execute()
+        rows = getattr(resp, "data", []) or []
+    except HTTPException:
+        # Propagate known HTTP errors
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {e}")
+
+    # Shape response items
+    items = []
+    for r in rows:
+        items.append(
+            {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "storage_path": r.get("storage_path"),
+                "type": r.get("mime_type"),
+                "size": r.get("size"),
+                "session_id": r.get("session_id"),
+                "created_at": r.get("created_at"),
+            }
+        )
+
+    return {"items": items}
 
 # PUBLIC_INTERFACE
 @router.post(
