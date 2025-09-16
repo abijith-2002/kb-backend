@@ -88,11 +88,13 @@ begin
 end;
 $$;
 
+-- Ensure no leftover trigger definition exists before creating it
 drop trigger if exists t_sessions_set_updated_at on public.sessions;
+
+-- Create trigger with explicit EXECUTE FUNCTION syntax (PostgreSQL 13+)
 create trigger t_sessions_set_updated_at
   before update on public.sessions
-  for each row
-  execute function public.set_updated_at();
+  for each row execute function public.set_updated_at();
 
 -- Enable RLS
 alter table public.sessions enable row level security;
