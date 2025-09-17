@@ -11,6 +11,9 @@ from .models import HealthResponse
 from .routers.auth import router as auth_router
 from .routers.sessions import router as sessions_router
 from .routers.files import router as files_router
+from .routers.chat import router as chat_router
+from .routers.admin import router as admin_router
+from .routers.misc import router as misc_router
 
 # Load environment variables
 load_dotenv()
@@ -38,12 +41,15 @@ def init_supabase() -> Optional[Client]:
 
 app = FastAPI(
     title="KnowledgeBot Backend",
-    description="FastAPI backend for KnowledgeBot with Supabase Auth, sessions, and file stubs.",
-    version="0.1.0",
+    description="FastAPI backend for KnowledgeBot with Supabase Auth, sessions, file processing, embeddings, Chroma search, and Gemini answer generation.",
+    version="0.2.0",
     openapi_tags=[
         {"name": "Auth", "description": "Authentication endpoints (Supabase Auth)"},
         {"name": "Sessions", "description": "Chat session management"},
-        {"name": "Files", "description": "File management (stubs)"},
+        {"name": "Files", "description": "File management and ingestion"},
+        {"name": "Chat", "description": "Messages, RAG answer, semantic search"},
+        {"name": "Admin", "description": "Admin monitoring"},
+        {"name": "Misc", "description": "Quota, moderation, audit logs"},
     ],
 )
 
@@ -68,3 +74,6 @@ def health_check():
 app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(files_router)
+app.include_router(chat_router)
+app.include_router(admin_router)
+app.include_router(misc_router)
