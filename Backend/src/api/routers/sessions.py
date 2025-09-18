@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import create_client
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from ..deps import get_current_user
-from ..models import SessionCreate, SessionUpdate, Session, SessionsList
+from ..models import SessionCreate, SessionUpdate, Session, SessionsList, MessagesList, Message, MessageCreate
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -151,3 +151,156 @@ def pin_file_to_session(session_id: str, file_id: str, user=Depends(get_current_
         raise
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to pin file: {e}")
+
+# PUBLIC_INTERFACE
+@router.get(
+    "/{session_id}/messages",
+    response_model=MessagesList,
+    summary="List session messages",
+    description="List messages for a given session in ascending order (must belong to current user).",
+)
+def list_session_messages(session_id: str, user=Depends(get_current_user)) -> MessagesList:
+    """
+    List messages for a session owned by the current user.
+
+    Returns messages ordered ascending by created_at.
+    """
+    sb = get_supabase()
+    # Validate session ownership
+    sess_resp = (
+        sb.table("sessions")
+        .select("id")
+        .eq("id", session_id)
+        .eq("user_id", user["id"])
+        .single()
+        .execute()
+    )
+    if not getattr(sess_resp, "data", None):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Fetch messages with RLS in place
+    resp = (
+        sb.table("messages")
+        .select("*")
+        .eq("session_id", session_id)
+        .eq("user_id", user["id"])
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = getattr(resp, "data", []) or []
+    items: List[Message] = [Message(**r) for r in rows]
+    return MessagesList(items=items)
+
+# PUBLIC_INTERFACE
+@router.post(
+    "/{session_id}/messages",
+    response_model=MessagesList,
+    summary="Create user message (requires pinned file)",
+    description="Accepts a user message only if at least one file is pinned to the session. Inserts the user message and a stub assistant response, returning both.",
+)
+def create_user_message(session_id: str, payload: MessageCreate, user=Depends(get_current_user)) -> MessagesList:
+    """
+    Create a new user message after validating:
+    - Session exists and belongs to the user.
+    - At least one file is pinned to the session.
+
+    Then insert:
+    - The user's message (role='user').
+    - A stub assistant message acknowledging receipt.
+
+    Returns both inserted messages ordered by created_at ascending.
+    """
+    if not payload.content or not payload.content.strip():
+        raise HTTPException(status_code=400, detail="Message content cannot be empty")
+
+    sb = get_supabase()
+
+    # Validate session ownership
+    sess_resp = (
+        sb.table("sessions")
+        .select("id")
+        .eq("id", session_id)
+        .eq("user_id", user["id"])
+        .single()
+        .execute()
+    )
+    if not getattr(sess_resp, "data", None):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Enforce at least one pinned file
+    files_resp = (
+        sb.table("files")
+        .select("id")
+        .eq("user_id", user["id"])
+        .eq("session_id", session_id)
+        .limit(1)
+        .execute()
+    )
+    files = getattr(files_resp, "data", []) or []
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one file must be pinned to this session before sending messages.",
+        )
+
+    # Insert user message
+    try:
+        user_msg_resp = (
+            sb.table("messages")
+            .insert(
+                {
+                    "session_id": session_id,
+                    "user_id": user["id"],
+                    "role": "user",
+                    "content": payload.content.strip(),
+                }
+            )
+            .select("*")
+            .single()
+            .execute()
+        )
+        user_msg_row = getattr(user_msg_resp, "data", None)
+        if not user_msg_row:
+            raise HTTPException(status_code=500, detail="Failed to insert user message")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to insert user message: {e}")
+
+    # Insert stub assistant response
+    try:
+        assistant_msg_resp = (
+            sb.table("messages")
+            .insert(
+                {
+                    "session_id": session_id,
+                    "user_id": user["id"],
+                    "role": "assistant",
+                    "content": "Thanks! File received, processing soon.",
+                }
+            )
+            .select("*")
+            .single()
+            .execute()
+        )
+        assistant_msg_row = getattr(assistant_msg_resp, "data", None)
+        if not assistant_msg_row:
+            raise HTTPException(status_code=500, detail="Failed to insert assistant message")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to insert assistant message: {e}")
+
+    # Return both messages ascending by created_at
+    # We re-query both by IDs to preserve any DB-populated fields and ordering
+    ids = [user_msg_row["id"], assistant_msg_row["id"]]
+    list_resp = (
+        sb.table("messages")
+        .select("*")
+        .in_("id", ids)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    rows = getattr(list_resp, "data", []) or []
+    items: List[Message] = [Message(**r) for r in rows]
+    return MessagesList(items=items)

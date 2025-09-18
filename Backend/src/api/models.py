@@ -57,3 +57,24 @@ class Session(BaseModel):
 class SessionsList(BaseModel):
     """List of sessions."""
     items: List[Session] = Field(..., description="Sessions for current user")
+
+# Message models
+# PUBLIC_INTERFACE
+class Message(BaseModel):
+    """A chat message within a session."""
+    id: str = Field(..., description="Message ID (UUID)")
+    session_id: str = Field(..., description="Associated session ID")
+    user_id: str = Field(..., description="Owner user ID")
+    role: str = Field(..., description="Message role: user | assistant | system")
+    content: str = Field(..., description="Message content")
+    created_at: Optional[str] = Field(None, description="Creation timestamp (ISO)")
+
+# PUBLIC_INTERFACE
+class MessagesList(BaseModel):
+    """List of messages for a session."""
+    items: List[Message] = Field(..., description="Messages ordered ascending by created_at")
+
+# PUBLIC_INTERFACE
+class MessageCreate(BaseModel):
+    """Create a new user message in a session."""
+    content: str = Field(..., description="User message content")
