@@ -64,9 +64,32 @@ def _get_bucket_name() -> str:
     return bucket
 
 # PUBLIC_INTERFACE
-@router.get("", summary="List files (stub)", description="Protected stub endpoint for listing files.")
-def list_files(user=Depends(get_current_user)):
-    return {"items": [], "note": "Files endpoints are stubs. To be implemented."}
+@router.get(
+    "",
+    summary="List files",
+    description="List the current user's files, optionally filtered by session_id.",
+)
+def list_files(session_id: Optional[str] = None, user=Depends(get_current_user)):
+    """
+    List files that belong to the current user.
+
+    Query params:
+    - session_id (optional): If provided, only list files linked to this session.
+
+    Returns:
+    - { "items": [ ...file rows... ] }
+    """
+    sb = _get_supabase()
+    try:
+        query = sb.table("files").select("*").eq("user_id", user["id"]).order("created_at", desc=True)
+        if session_id:
+            query = query.eq("session_id", session_id)
+        resp = query.execute()
+        rows = getattr(resp, "data", []) or []
+        return {"items": rows}
+    except Exception as e:
+        # Hide internal details but keep informative message
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {e}")
 
 # PUBLIC_INTERFACE
 @router.post(
@@ -138,9 +161,6 @@ async def upload_file(
     bucket = _get_bucket_name()
 
     try:
-        # Ensure bucket exists is typically handled outside; here we assume it exists.
-        # The supabase-py client expects a path string and file-like/bytes for upload.
-        # We pass bytes directly with file_options including content-type.
         sb.storage.from_(bucket).upload(
             path=storage_path,
             file=content,
@@ -181,6 +201,50 @@ async def upload_file(
     return row
 
 # PUBLIC_INTERFACE
-@router.delete("/{file_id}", summary="Delete file (stub)", description="Protected stub endpoint for deleting a file.")
+@router.delete(
+    "/{file_id}",
+    summary="Delete file",
+    description="Delete a file you own: removes DB record and Storage object if found.",
+)
 def delete_file(file_id: str, user=Depends(get_current_user)):
-    return {"success": True, "note": f"Delete stub for {file_id}. To be implemented."}
+    """
+    Delete a user-owned file.
+
+    Steps:
+    1) Fetch the file by id and ensure it belongs to the current user.
+    2) Remove the DB record.
+    3) Attempt to delete the storage object. If storage deletion fails, surface a 502.
+    """
+    if not file_id:
+        raise HTTPException(status_code=400, detail="file_id is required")
+
+    sb = _get_supabase()
+    bucket = _get_bucket_name()
+
+    # Fetch file ensuring ownership
+    try:
+        resp = sb.table("files").select("*").eq("id", file_id).eq("user_id", user["id"]).single().execute()
+        row = getattr(resp, "data", None)
+    except Exception:
+        row = None
+
+    if not row:
+        # Either doesn't exist or not owned by the user -> 404 (avoid leaking existence)
+        raise HTTPException(status_code=404, detail="File not found")
+
+    storage_path = row.get("storage_path")
+    # First delete DB record (RLS ensures only owner can delete)
+    try:
+        sb.table("files").delete().eq("id", file_id).eq("user_id", user["id"]).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file record: {e}")
+
+    # Then attempt to delete storage object (best-effort; if it fails, return 502 so clients can retry/alert)
+    if storage_path:
+        try:
+            sb.storage.from_(bucket).remove([storage_path])
+        except Exception as e:
+            # The DB record is already gone; report storage issue
+            raise HTTPException(status_code=502, detail=f"Failed to remove storage object: {e}")
+
+    return {"success": True, "id": file_id}
