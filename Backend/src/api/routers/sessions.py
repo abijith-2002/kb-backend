@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import create_client
 import os
+from typing import Dict, Any
 
 from ..deps import get_current_user
 from ..models import SessionCreate, SessionUpdate, Session, SessionsList
@@ -86,3 +87,67 @@ def delete_session(session_id: str, user=Depends(get_current_user)):
     sb.table("sessions").delete().eq("id", session_id).eq("user_id", user["id"]).execute()
     # Return no content
     return
+
+# PUBLIC_INTERFACE
+@router.post(
+    "/{session_id}/files/{file_id}/pin",
+    summary="Pin file to session",
+    description="Link a file to a session by setting files.session_id. Requires both the session and file to belong to the current user. Idempotent: if already linked, returns success.",
+)
+def pin_file_to_session(session_id: str, file_id: str, user=Depends(get_current_user)) -> Dict[str, Any]:
+    """
+    Pin a file to a session (set files.session_id) with strict ownership checks.
+
+    Steps:
+    1) Validate the session exists and is owned by the current user.
+    2) Validate the file exists and is owned by the current user.
+    3) If file.session_id is already the requested session_id, return the current file row.
+    4) Otherwise, update files.session_id = session_id and return the updated file row.
+
+    Returns:
+    - The updated file row (JSON) including id, user_id, session_id, name, storage_path, etc.
+    """
+    sb = get_supabase()
+
+    # Verify session ownership
+    sess_resp = (
+        sb.table("sessions").select("id,user_id").eq("id", session_id).eq("user_id", user["id"]).single().execute()
+    )
+    session_row = getattr(sess_resp, "data", None)
+    if not session_row:
+        # Do not leak existence; if not owned or not found -> 404
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    # Verify file ownership
+    file_resp = (
+        sb.table("files").select("*").eq("id", file_id).eq("user_id", user["id"]).single().execute()
+    )
+    file_row = getattr(file_resp, "data", None)
+    if not file_row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    # Idempotency: already pinned to this session
+    current_session_id = file_row.get("session_id")
+    if current_session_id == session_id:
+        return file_row
+
+    # Update the file's session_id; RLS enforces user ownership
+    try:
+        upd_resp = (
+            sb.table("files")
+            .update({"session_id": session_id})
+            .eq("id", file_id)
+            .eq("user_id", user["id"])
+            .select("*")
+            .single()
+            .execute()
+        )
+        updated = getattr(upd_resp, "data", None)
+        if not updated:
+            # Could happen if RLS blocked or row missing
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found or not updated")
+        return updated
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to pin file: {e}")
