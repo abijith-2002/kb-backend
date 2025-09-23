@@ -43,7 +43,7 @@ app = FastAPI(
     openapi_tags=[
         {"name": "Auth", "description": "Authentication endpoints (Supabase Auth)"},
         {"name": "Sessions", "description": "Chat session management"},
-        {"name": "Files", "description": "File management (stubs)"},
+        {"name": "Files", "description": "File storage management (upload, list, delete)"},
     ],
 )
 
