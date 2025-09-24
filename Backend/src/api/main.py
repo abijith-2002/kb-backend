@@ -11,6 +11,7 @@ from .models import HealthResponse
 from .routers.auth import router as auth_router
 from .routers.sessions import router as sessions_router
 from .routers.files import router as files_router
+from .routers.messages import router as messages_router
 
 # Load environment variables
 load_dotenv()
@@ -43,7 +44,8 @@ app = FastAPI(
     openapi_tags=[
         {"name": "Auth", "description": "Authentication endpoints (Supabase Auth)"},
         {"name": "Sessions", "description": "Chat session management"},
-        {"name": "Files", "description": "File management (stubs)"},
+        {"name": "Files", "description": "File management"},
+        {"name": "Messages", "description": "Create and manage chat messages"},
     ],
 )
 
@@ -68,3 +70,4 @@ def health_check():
 app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(files_router)
+app.include_router(messages_router)

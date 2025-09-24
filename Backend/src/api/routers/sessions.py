@@ -18,7 +18,7 @@ def get_supabase():
     return create_client(url, key)
 
 # PUBLIC_INTERFACE
-@router.get("", response_model=SessionsList, summary="List sessions", description="List all sessions for the current user.")
+@router.get("", response_model=SessionsList, summary="List sessions", description="List all sessions for the current user. Requires Authorization: Bearer <token>.")
 def list_sessions(user=Depends(get_current_user)):
     sb = get_supabase()
     resp = (
