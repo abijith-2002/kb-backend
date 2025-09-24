@@ -57,3 +57,36 @@ class Session(BaseModel):
 class SessionsList(BaseModel):
     """List of sessions."""
     items: List[Session] = Field(..., description="Sessions for current user")
+
+# Files models
+# PUBLIC_INTERFACE
+class FileMeta(BaseModel):
+    """File metadata record."""
+    id: str = Field(..., description="File ID (UUID)")
+    user_id: str = Field(..., description="Owner user ID")
+    session_id: Optional[str] = Field(None, description="Linked session ID")
+    name: str = Field(..., description="Original filename")
+    storage_path: str = Field(..., description="Path within storage bucket")
+    mime_type: Optional[str] = Field(None, description="MIME type")
+    size: Optional[int] = Field(None, description="File size in bytes")
+    created_at: Optional[str] = Field(None, description="Creation timestamp (ISO)")
+
+# PUBLIC_INTERFACE
+class FilesList(BaseModel):
+    """List of files."""
+    items: List[FileMeta] = Field(..., description="Files for current user/session")
+
+# Messages models
+# PUBLIC_INTERFACE
+class MessageCreate(BaseModel):
+    """Create a new message in a session."""
+    role: str = Field(..., description="Message role (must be 'user' in Increment 2)")
+    content: str = Field(..., description="Message content")
+
+# PUBLIC_INTERFACE
+class MessageStubResponse(BaseModel):
+    """Assistant stub response for message processing."""
+    id: str = Field(..., description="Generated UUID for assistant message")
+    role: str = Field(..., description="Role, 'assistant'")
+    content: str = Field(..., description="Assistant stub content")
+    timestamp: str = Field(..., description="ISO timestamp")
