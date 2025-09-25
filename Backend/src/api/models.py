@@ -57,3 +57,38 @@ class Session(BaseModel):
 class SessionsList(BaseModel):
     """List of sessions."""
     items: List[Session] = Field(..., description="Sessions for current user")
+
+# Files models (Increment 2)
+# PUBLIC_INTERFACE
+class FileItem(BaseModel):
+    """Stored file metadata."""
+    id: str = Field(..., description="File ID (UUID)")
+    user_id: str = Field(..., description="Owner user ID")
+    session_id: Optional[str] = Field(None, description="Associated session ID")
+    name: str = Field(..., description="Original file name")
+    storage_path: str = Field(..., description="Path in storage bucket")
+    mime_type: Optional[str] = Field(None, description="MIME type")
+    size: Optional[int] = Field(None, description="Size in bytes")
+    created_at: Optional[str] = Field(None, description="Creation timestamp (ISO)")
+
+# PUBLIC_INTERFACE
+class FilesList(BaseModel):
+    """List of file items."""
+    items: List[FileItem] = Field(..., description="Files for current user (optionally filtered by session)")
+
+# Messages models (Increment 2)
+# PUBLIC_INTERFACE
+class MessageCreate(BaseModel):
+    """Create a new message in a session."""
+    role: str = Field(..., description="Message role. Only 'user' is accepted in Increment 2.")
+    content: str = Field(..., description="Message content")
+
+# PUBLIC_INTERFACE
+class MessageItem(BaseModel):
+    """Message record."""
+    id: str = Field(..., description="Message ID (UUID)")
+    session_id: str = Field(..., description="Session ID")
+    user_id: str = Field(..., description="Owner user ID")
+    role: str = Field(..., description="Role: user|assistant|system")
+    content: str = Field(..., description="Content")
+    created_at: Optional[str] = Field(None, description="Creation timestamp (ISO)")

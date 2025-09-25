@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import create_client
 import os
+from datetime import datetime, timezone
+import uuid
 
 from ..deps import get_current_user
-from ..models import SessionCreate, SessionUpdate, Session, SessionsList
+from ..models import SessionCreate, SessionUpdate, Session, SessionsList, MessageCreate, MessageItem
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -86,3 +88,78 @@ def delete_session(session_id: str, user=Depends(get_current_user)):
     sb.table("sessions").delete().eq("id", session_id).eq("user_id", user["id"]).execute()
     # Return no content
     return
+
+# PUBLIC_INTERFACE
+@router.post(
+    "/{session_id}/messages",
+    response_model=MessageItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Post user message",
+    description="Post a user message in a session. Requires at least one file uploaded for the session. Returns assistant stub response.",
+)
+def post_message(session_id: str, payload: MessageCreate, user=Depends(get_current_user)):
+    """
+    Increment 2 messages behavior:
+    - Validate that session belongs to the user.
+    - Accept only role='user' messages with non-empty content.
+    - Precondition: at least one file exists for this session & user.
+    - Persist the user message.
+    - Return an assistant stub message acknowledging receipt.
+    """
+    sb = get_supabase()
+
+    # Validate session ownership
+    sresp = sb.table("sessions").select("id,user_id").eq("id", session_id).single().execute()
+    srow = getattr(sresp, "data", None)
+    if not srow or srow.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Validate role and content
+    if payload.role != "user":
+        raise HTTPException(status_code=400, detail="Only role='user' is supported in this increment")
+    if not payload.content or not payload.content.strip():
+        raise HTTPException(status_code=400, detail="Content is required")
+
+    # Precondition: at least one file for session
+    fresp = sb.table("files").select("id").eq("user_id", user["id"]).eq("session_id", session_id).limit(1).execute()
+    files_rows = getattr(fresp, "data", []) or []
+    if not files_rows:
+        raise HTTPException(status_code=400, detail="At least one file must be uploaded for this session before sending messages")
+
+    # Insert user message
+    try:
+        (
+            sb.table("messages")
+            .insert({"session_id": session_id, "user_id": user["id"], "role": "user", "content": payload.content})
+            .select("*")
+            .single()
+            .execute()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save message: {e}")
+
+    # Create assistant stub (not persisted as assistant response yet, or we can persist too)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    assistant_msg = {
+        "id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "user_id": user["id"],
+        "role": "assistant",
+        "content": "Thanks! File received, processing soon.",
+        "created_at": now_iso,
+    }
+    # Optionally persist assistant stub for thread continuity
+    try:
+        sb.table("messages").insert({
+            "id": assistant_msg["id"],
+            "session_id": session_id,
+            "user_id": user["id"],
+            "role": "assistant",
+            "content": assistant_msg["content"],
+            "created_at": assistant_msg["created_at"],
+        }).execute()
+    except Exception:
+        # Non-fatal; still return assistant stub
+        pass
+
+    return MessageItem(**assistant_msg)

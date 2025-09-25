@@ -38,12 +38,12 @@ def init_supabase() -> Optional[Client]:
 
 app = FastAPI(
     title="KnowledgeBot Backend",
-    description="FastAPI backend for KnowledgeBot with Supabase Auth, sessions, and file stubs.",
+    description="FastAPI backend for KnowledgeBot with Supabase Auth, sessions, files (Increment 2), and messages stubs.",
     version="0.1.0",
     openapi_tags=[
         {"name": "Auth", "description": "Authentication endpoints (Supabase Auth)"},
         {"name": "Sessions", "description": "Chat session management"},
-        {"name": "Files", "description": "File management (stubs)"},
+        {"name": "Files", "description": "File management: upload/list/delete using Supabase Storage (Increment 2)"},
     ],
 )
 
