@@ -40,13 +40,25 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
     """
     Create a session for the current user.
 
+    Important:
+    - The inserted row must include user_id set to the authenticated user's id so that
+      the RLS policy (auth.uid() = user_id) passes in Supabase.
+
     Supabase Python client does not support chaining select() after insert() on SyncQueryRequestBuilder.
     Therefore, we:
-      1) perform the insert
+      1) perform the insert with {"user_id": <jwt user id>, "title": <optional>}
       2) issue a separate select to fetch the newly created record
     """
     sb = get_supabase()
-    to_insert = {"user_id": user["id"], "title": payload.title}
+
+    # Ensure we have the authenticated user's id from the Supabase JWT (via get_current_user)
+    user_id = user.get("id")
+    if not user_id:
+        # This should not occur as get_current_user enforces auth, but double-check for safety.
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    # Build payload for insert ensuring user_id is set for RLS with-check policy
+    to_insert = {"user_id": user_id, "title": payload.title}
 
     # Step 1: Insert (no select chaining)
     try:
@@ -71,7 +83,7 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
                 sb.table("sessions")
                 .select("*")
                 .eq("id", created_row["id"])
-                .eq("user_id", user["id"])
+                .eq("user_id", user_id)
                 .single()
                 .execute()
             )
@@ -80,7 +92,7 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
             sel_q = (
                 sb.table("sessions")
                 .select("*")
-                .eq("user_id", user["id"])
+                .eq("user_id", user_id)
                 .order("created_at", desc=True)
             )
             # If title is None we can't filter by equality reliably; otherwise, filter by title
