@@ -57,9 +57,10 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     to_insert = {"user_id": user_id, "title": payload.title}
-
+    print(user_id)
     try:
         insert_resp = sb.table("sessions").insert(to_insert).execute()
+        
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create session: {e}")
 

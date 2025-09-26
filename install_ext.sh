@@ -1,1 +1,1 @@
-code --install-extension akamud.vscode-theme-onedark
+code-server --install-extension akamud.vscode-theme-onedark
