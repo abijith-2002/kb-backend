@@ -65,6 +65,7 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
     try:
         insert_resp = sb.table("sessions").insert(to_insert).execute()
     except Exception as e:
+        print("failed to create")
         raise HTTPException(status_code=400, detail=f"Failed to create session: {e}")
 
     # Attempt to get the inserted id if returned in data (some drivers return created rows)
@@ -108,6 +109,7 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail=f"Failed to fetch created session: {e}")
 
     if not row:
+        print("not rpw")
         raise HTTPException(status_code=400, detail="Failed to create session")
 
     return Session(**row)
