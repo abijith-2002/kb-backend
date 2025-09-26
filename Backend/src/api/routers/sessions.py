@@ -53,6 +53,7 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
 
     # Ensure we have the authenticated user's id from the Supabase JWT (via get_current_user)
     user_id = user.get("id")
+    print(user_id)
     if not user_id:
         # This should not occur as get_current_user enforces auth, but double-check for safety.
         raise HTTPException(status_code=401, detail="Not authenticated")
