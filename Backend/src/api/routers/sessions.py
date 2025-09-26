@@ -37,12 +37,66 @@ def list_sessions(user=Depends(get_current_user)):
 # PUBLIC_INTERFACE
 @router.post("", response_model=Session, status_code=201, summary="Create session", description="Create a new session for the current user.")
 def create_session(payload: SessionCreate, user=Depends(get_current_user)):
+    """
+    Create a session for the current user.
+
+    Supabase Python client does not support chaining select() after insert() on SyncQueryRequestBuilder.
+    Therefore, we:
+      1) perform the insert
+      2) issue a separate select to fetch the newly created record
+    """
     sb = get_supabase()
     to_insert = {"user_id": user["id"], "title": payload.title}
-    resp = sb.table("sessions").insert(to_insert).select("*").single().execute()
-    row = getattr(resp, "data", None)
+
+    # Step 1: Insert (no select chaining)
+    try:
+        insert_resp = sb.table("sessions").insert(to_insert).execute()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to create session: {e}")
+
+    # Attempt to get the inserted id if returned in data (some drivers return created rows)
+    created_row = None
+    data_after_insert = getattr(insert_resp, "data", None) or []
+    if isinstance(data_after_insert, list) and data_after_insert:
+        # If rows are returned, try to use them directly
+        created_row = data_after_insert[0]
+    elif isinstance(data_after_insert, dict) and data_after_insert:
+        created_row = data_after_insert
+
+    # Step 2: Fetch the inserted record reliably
+    # Prefer selecting by id if we have it; otherwise select the latest created for this user and title.
+    try:
+        if created_row and created_row.get("id"):
+            sel_resp = (
+                sb.table("sessions")
+                .select("*")
+                .eq("id", created_row["id"])
+                .eq("user_id", user["id"])
+                .single()
+                .execute()
+            )
+        else:
+            # Fallback: fetch the most recent session for this user with the same title
+            sel_q = (
+                sb.table("sessions")
+                .select("*")
+                .eq("user_id", user["id"])
+                .order("created_at", desc=True)
+            )
+            # If title is None we can't filter by equality reliably; otherwise, filter by title
+            if payload.title is not None:
+                sel_q = sel_q.eq("title", payload.title)
+            sel_resp = sel_q.limit(1).execute()
+        row = getattr(sel_resp, "data", None)
+        # When using .single() we get a dict; with .limit(1) we get a list
+        if isinstance(row, list):
+            row = row[0] if row else None
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch created session: {e}")
+
     if not row:
         raise HTTPException(status_code=400, detail="Failed to create session")
+
     return Session(**row)
 
 # PUBLIC_INTERFACE
