@@ -12,6 +12,7 @@ from ..models import (
     SessionsList,
     MessageCreate,
     MessageItem,
+    SessionWithMessages,
 )
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
@@ -89,14 +90,50 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
 # ---------------------
 # Get session by ID
 # ---------------------
-@router.get("/{session_id}", response_model=Session, summary="Get session")
+@router.get(
+    "/{session_id}",
+    response_model=SessionWithMessages,
+    summary="Get session",
+    description="Return a session metadata along with its messages array for the current user."
+)
 def get_session(session_id: str, user=Depends(get_current_user)):
+    """
+    Retrieve a session by ID (owned by the current user) and include all messages
+    associated with that session in chronological order.
+    """
     sb = get_supabase()
-    resp = sb.table("sessions").select("*").eq("id", session_id).eq("user_id", user["id"]).single().execute()
-    row = getattr(resp, "data", None)
-    if not row:
+    # Fetch session ensuring ownership
+    s_resp = (
+        sb.table("sessions")
+        .select("*")
+        .eq("id", session_id)
+        .eq("user_id", user["id"])
+        .single()
+        .execute()
+    )
+    session_row = getattr(s_resp, "data", None)
+    if not session_row:
         raise HTTPException(status_code=404, detail="Session not found")
-    return Session(**row)
+
+    # Fetch messages for this session (RLS ensures same user access), oldest first
+    m_resp = (
+        sb.table("messages")
+        .select("*")
+        .eq("session_id", session_id)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    message_rows = getattr(m_resp, "data", []) or []
+    messages = [MessageItem(**m) for m in message_rows]
+
+    return SessionWithMessages(
+        id=session_row["id"],
+        user_id=session_row["user_id"],
+        title=session_row.get("title"),
+        created_at=session_row.get("created_at"),
+        updated_at=session_row.get("updated_at"),
+        messages=messages,
+    )
 
 
 # ---------------------

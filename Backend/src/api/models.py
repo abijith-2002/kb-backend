@@ -92,3 +92,13 @@ class MessageItem(BaseModel):
     role: str = Field(..., description="Role: user|assistant|system")
     content: str = Field(..., description="Content")
     created_at: Optional[str] = Field(None, description="Creation timestamp (ISO)")
+
+# PUBLIC_INTERFACE
+class SessionWithMessages(BaseModel):
+    """Session record including associated messages."""
+    id: str = Field(..., description="Session ID (UUID)")
+    user_id: str = Field(..., description="Owner user ID")
+    title: Optional[str] = Field(None, description="Title")
+    created_at: Optional[str] = Field(None, description="Creation timestamp (ISO)")
+    updated_at: Optional[str] = Field(None, description="Update timestamp (ISO)")
+    messages: List[MessageItem] = Field(default_factory=list, description="Messages in this session (sorted by created_at asc)")
