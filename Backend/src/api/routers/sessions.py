@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from supabase import create_client
 import os
 from datetime import datetime, timezone
@@ -33,8 +33,14 @@ def get_supabase():
 # List sessions
 # ---------------------
 @router.get("", response_model=SessionsList, summary="List sessions")
-def list_sessions(user=Depends(get_current_user)):
-    sb = get_supabase()
+def list_sessions(user=Depends(get_current_user), request: Request = None):
+    # Use a client that carries the user's JWT for RLS
+    auth_header = request.headers.get("authorization") if request else None
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+    from ..deps import get_supabase_for_user_request
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
     resp = (
         sb.table("sessions")
         .select("*")
@@ -51,8 +57,13 @@ def list_sessions(user=Depends(get_current_user)):
 # Create session
 # ---------------------
 @router.post("", response_model=Session, status_code=201, summary="Create session")
-def create_session(payload: SessionCreate, user=Depends(get_current_user)):
-    sb = get_supabase()
+def create_session(payload: SessionCreate, user=Depends(get_current_user), request: Request = None):
+    auth_header = request.headers.get("authorization") if request else None
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+    from ..deps import get_supabase_for_user_request
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
     user_id = user.get("id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -96,12 +107,17 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
     summary="Get session",
     description="Return a session metadata along with its messages array for the current user."
 )
-def get_session(session_id: str, user=Depends(get_current_user)):
+def get_session(session_id: str, user=Depends(get_current_user), request: Request = None):
     """
     Retrieve a session by ID (owned by the current user) and include all messages
     associated with that session in chronological order.
     """
-    sb = get_supabase()
+    auth_header = request.headers.get("authorization") if request else None
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+    from ..deps import get_supabase_for_user_request
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
     # Fetch session ensuring ownership
     s_resp = (
         sb.table("sessions")
@@ -140,8 +156,13 @@ def get_session(session_id: str, user=Depends(get_current_user)):
 # Update session
 # ---------------------
 @router.patch("/{session_id}", response_model=Session, summary="Update session")
-def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_current_user)):
-    sb = get_supabase()
+def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_current_user), request: Request = None):
+    auth_header = request.headers.get("authorization") if request else None
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+    from ..deps import get_supabase_for_user_request
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
     updates = {}
     if payload.title is not None:
         updates["title"] = payload.title
@@ -168,8 +189,13 @@ def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_cur
 # Delete session
 # ---------------------
 @router.delete("/{session_id}", status_code=204, summary="Delete session")
-def delete_session(session_id: str, user=Depends(get_current_user)):
-    sb = get_supabase()
+def delete_session(session_id: str, user=Depends(get_current_user), request: Request = None):
+    auth_header = request.headers.get("authorization") if request else None
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+    from ..deps import get_supabase_for_user_request
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
     sb.table("sessions").delete().eq("id", session_id).eq("user_id", user["id"]).execute()
     return
 
@@ -183,8 +209,13 @@ def delete_session(session_id: str, user=Depends(get_current_user)):
     status_code=status.HTTP_201_CREATED,
     summary="Post user message",
 )
-def post_message(session_id: str, payload: MessageCreate, user=Depends(get_current_user)):
-    sb = get_supabase()
+def post_message(session_id: str, payload: MessageCreate, user=Depends(get_current_user), request: Request = None):
+    auth_header = request.headers.get("authorization") if request else None
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+    from ..deps import get_supabase_for_user_request
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
 
     # Validate session ownership
     sresp = sb.table("sessions").select("id,user_id").eq("id", session_id).single().execute()

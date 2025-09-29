@@ -25,6 +25,28 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 # PUBLIC_INTERFACE
+def get_supabase_for_user_request(access_token: str) -> Client:
+    """Create a Supabase client and attach the end-user access token for RLS-aware DB calls.
+
+    This ensures PostgREST receives the user's JWT (auth.uid() is populated),
+    so row-level security policies like `with check (auth.uid() = user_id)` succeed on inserts/updates.
+
+    Parameters:
+    - access_token: The user's Supabase access token (JWT) from Authorization header.
+
+    Returns:
+    - Supabase Client with auth set to the provided user token.
+    """
+    client = get_supabase()
+    try:
+        # Attach the user's JWT to the client so DB requests run under their identity
+        client.auth.set_auth(access_token)
+    except Exception:
+        # If setting auth fails, we still return the client; DB calls may fail with RLS which our handlers surface.
+        pass
+    return client
+
+# PUBLIC_INTERFACE
 def get_current_user(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Dict[str, Any]:

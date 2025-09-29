@@ -1,7 +1,7 @@
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi import status
 from supabase import create_client, Client
 
@@ -30,12 +30,29 @@ def _ext(name: str) -> str:
     return name_lower[dot:] if dot != -1 else ""
 
 # PUBLIC_INTERFACE
-@router.get("", response_model=FilesList, summary="List files", description="List files for the current user. Optionally filter by session_id.")
-def list_files(session_id: Optional[str] = Query(None, description="Filter files by session ID"), user=Depends(get_current_user)):
+@router.get(
+    "",
+    response_model=FilesList,
+    summary="List files",
+    description="List files for the current user. Optionally filter by session_id.",
+)
+def list_files(
+    session_id: Optional[str] = Query(None, description="Filter files by session ID"),
+    user=Depends(get_current_user),
+    request: Request = None,
+):
     """
     List files owned by the current user. Optional filter by session_id.
     """
-    sb = get_supabase()
+    # Use a client that carries the end-user JWT so RLS sees auth.uid()
+    from ..deps import get_supabase_for_user_request  # local import to avoid cycles at module import
+    token = None
+    if request:
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1]
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
+
     q = sb.table("files").select("*").eq("user_id", user["id"]).order("created_at", desc=True)
     if session_id:
         q = q.eq("session_id", session_id)
@@ -56,6 +73,7 @@ async def upload_file(
     session_id: str = Form(..., description="Target session ID"),
     upload: UploadFile = File(..., description="File to upload (.docx, .pdf, .txt, .xlsx)"),
     user=Depends(get_current_user),
+    request: Request = None,
 ):
     """
     Upload a file associated to a session:
@@ -63,9 +81,16 @@ async def upload_file(
     - Stores object in Supabase Storage under user/{user_id}/session/{session_id}/{filename}.
     - Inserts metadata row into public.files and returns the record.
     """
-    sb = get_supabase()
+    # Build client with user's JWT to satisfy RLS
+    from ..deps import get_supabase_for_user_request
+    token = None
+    if request:
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1]
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
 
-    # Verify session belongs to user (RLS will also help, but explicit check gives clearer error)
+    # Verify session belongs to user (explicit check for clearer error)
     sresp = sb.table("sessions").select("id,user_id").eq("id", session_id).single().execute()
     srow = getattr(sresp, "data", None)
     if not srow or srow.get("user_id") != user["id"]:
@@ -83,10 +108,13 @@ async def upload_file(
 
     storage_path = f"user/{user['id']}/session/{session_id}/{filename}"
 
-    # Ensure bucket exists (best-effort; if bucket missing, this may fail)
+    # Upload to Supabase Storage
     try:
-        # Attempt to upload; supabase-py storage interface
-        sb.storage.from_(STORAGE_BUCKET).upload(storage_path, data, {"content-type": upload.content_type or "application/octet-stream", "x-upsert": "true"})
+        sb.storage.from_(STORAGE_BUCKET).upload(
+            storage_path,
+            data,
+            {"content-type": upload.content_type or "application/octet-stream", "x-upsert": "true"},
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to store file: {e}")
 
@@ -107,6 +135,12 @@ async def upload_file(
             sb.storage.from_(STORAGE_BUCKET).remove([storage_path])
         except Exception:
             pass
+        msg = str(e)
+        if "row level security" in msg.lower() or "rls" in msg.lower() or "permission" in msg.lower():
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized by RLS while inserting files. Ensure backend uses user JWT for DB calls and Supabase policies allow insert with auth.uid() = user_id. Verify SUPABASE_SERVICE_ROLE_KEY is set or Authorization header is forwarded.",
+            )
         raise HTTPException(status_code=500, detail=f"Failed to save metadata: {e}")
 
     row = getattr(iresp, "data", None)
@@ -121,11 +155,19 @@ async def upload_file(
     summary="Delete file",
     description="Delete a file by ID if owned by current user. Removes storage object and metadata.",
 )
-def delete_file(file_id: str, user=Depends(get_current_user)):
+def delete_file(file_id: str, user=Depends(get_current_user), request: Request = None):
     """
     Delete a file object and its metadata if owned by the user.
     """
-    sb = get_supabase()
+    # Build a Supabase client carrying the user's JWT for RLS-authorized DB calls
+    from ..deps import get_supabase_for_user_request
+    token = None
+    if request:
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1]
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
+
     # Fetch file to verify ownership and get storage path
     fresp = sb.table("files").select("*").eq("id", file_id).eq("user_id", user["id"]).single().execute()
     row = getattr(fresp, "data", None)
@@ -152,11 +194,18 @@ def delete_file(file_id: str, user=Depends(get_current_user)):
     summary="Delete a file for a session",
     description="Delete a file ensuring it belongs to the given session and user.",
 )
-def delete_session_file(session_id: str, file_id: str, user=Depends(get_current_user)):
+def delete_session_file(session_id: str, file_id: str, user=Depends(get_current_user), request: Request = None):
     """
     Delete a file constrained to a specific session to match frontend route plan.
     """
-    sb = get_supabase()
+    from ..deps import get_supabase_for_user_request
+    token = None
+    if request:
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1]
+    sb = get_supabase_for_user_request(token) if token else get_supabase()
+
     # Verify record matches session and owner
     f = sb.table("files").select("*").eq("id", file_id).eq("user_id", user["id"]).eq("session_id", session_id).single().execute()
     row = getattr(f, "data", None)
