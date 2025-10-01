@@ -8,6 +8,7 @@ Why you might see “new row violates row-level security policy” on POST /file
 
 Backend behavior (fixed):
 - The API constructs a Supabase client that carries the Authorization bearer token for each request and explicitly sets PostgREST auth. We call both `client.auth.set_auth(access_token)` and `client.postgrest.auth(access_token)` so DB calls run under the user’s identity and RLS `auth.uid()` is populated.
+- We centralize this in `deps.get_supabase_user_scoped(request)` and, for SDK variations, also defensively set `Authorization: Bearer <token>` directly on the PostgREST client headers. The POST /sessions route calls this helper before inserting.
 - If the Authorization header is missing or invalid, endpoints return 401 via the get_current_user dependency.
 
 Environment variables required:

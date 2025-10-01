@@ -8,7 +8,7 @@ import uuid
 
 from ..deps import (
     get_current_user,
-    get_supabase_for_user_request,
+    get_supabase_user_scoped,
     get_bearer_token_from_request,
     extract_user_id_from_token_unverified,
     get_supabase_debug_snapshot,
@@ -52,8 +52,7 @@ def list_sessions(user=Depends(get_current_user), request: Request = None):
     - SessionsList: Array of session records owned by the current user.
     """
     # Use a client that carries the user's JWT for RLS
-    token = get_bearer_token_from_request(request)
-    sb = get_supabase_for_user_request(token) if token else get_supabase()
+    sb = get_supabase_user_scoped(request)
     resp = (
         sb.table("sessions")
         .select("*")
@@ -79,7 +78,8 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
     - Backend-owned insert: we always set user_id from the authenticated JWT (sub) on the server.
       Clients must not send user_id. This is required to satisfy Supabase RLS:
       policy: WITH CHECK (auth.uid() = user_id).
-    - The request Authorization bearer token is forwarded to PostgREST so auth.uid() is populated.
+    - The request Authorization bearer token is forwarded to PostgREST using
+      `client.postgrest.auth(<access_token>)` so `auth.uid()` is populated.
 
     Parameters:
     - payload: SessionCreate with an optional title.
@@ -87,11 +87,14 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
     Returns:
     - Session: The newly created session record.
     """
-    token = get_bearer_token_from_request(request)
-    sb = get_supabase_for_user_request(token) if token else get_supabase()
+    # Configure PostgREST with the end-user JWT before DB calls
+    sb = get_supabase_user_scoped(request)
     user_id = user.get("id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
+
+    # Keep token for diagnostics only (never return full token)
+    token = get_bearer_token_from_request(request)
 
     # CRITICAL: Do NOT accept user_id from the client. RLS requires auth.uid() = user_id on insert.
     # Always derive it from the authenticated user's token.
@@ -204,8 +207,7 @@ def get_session(session_id: str, user=Depends(get_current_user), request: Reques
     Returns:
     - SessionWithMessages: Session and its messages.
     """
-    token = get_bearer_token_from_request(request)
-    sb = get_supabase_for_user_request(token) if token else get_supabase()
+    sb = get_supabase_user_scoped(request)
     # Fetch session ensuring ownership
     s_resp = (
         sb.table("sessions")
@@ -256,8 +258,7 @@ def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_cur
     Returns:
     - Session: Updated session record.
     """
-    token = get_bearer_token_from_request(request)
-    sb = get_supabase_for_user_request(token) if token else get_supabase()
+    sb = get_supabase_user_scoped(request)
     updates = {}
     if payload.title is not None:
         updates["title"] = payload.title
@@ -305,8 +306,7 @@ def delete_session(session_id: str, user=Depends(get_current_user), request: Req
     Returns:
     - 204 No Content on success.
     """
-    token = get_bearer_token_from_request(request)
-    sb = get_supabase_for_user_request(token) if token else get_supabase()
+    sb = get_supabase_user_scoped(request)
     sb.table("sessions").delete().eq("id", session_id).eq("user_id", user["id"]).execute()
     return
 
@@ -332,8 +332,7 @@ def post_message(session_id: str, payload: MessageCreate, user=Depends(get_curre
     Returns:
     - MessageItem: Assistant stub reply record.
     """
-    token = get_bearer_token_from_request(request)
-    sb = get_supabase_for_user_request(token) if token else get_supabase()
+    sb = get_supabase_user_scoped(request)
 
     # Validate session ownership
     sresp = sb.table("sessions").select("id,user_id").eq("id", session_id).single().execute()

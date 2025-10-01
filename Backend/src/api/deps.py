@@ -66,13 +66,31 @@ def get_supabase_for_user_request(access_token: str) -> Client:
         # Ignore; may still succeed via PostgREST explicit auth
         logger.debug("get_supabase_for_user_request: client.auth.set_auth failed or unavailable.")
 
+    # CRITICAL: Ensure PostgREST carries the user's token so auth.uid() is populated in RLS checks
     try:
-        # CRITICAL: Ensure PostgREST carries the user's token so auth.uid() is populated in RLS checks
         client.postgrest.auth(access_token)
         postgrest_auth_applied = True
     except Exception:
         # Older SDKs may not expose postgrest.auth; ignore if unavailable
         logger.warning("get_supabase_for_user_request: client.postgrest.auth unavailable on this SDK.")
+
+    # Defensive fallback for SDK variations: write the header directly if possible
+    try:
+        postgrest_client = getattr(client, "postgrest", None)
+        if postgrest_client is not None:
+            for candidate in ("headers", "_headers", "default_headers"):
+                hdrs = getattr(postgrest_client, candidate, None)
+                if isinstance(hdrs, dict):
+                    # Set or overwrite Authorization header
+                    hdrs["Authorization"] = f"Bearer {access_token}"
+                    try:
+                        setattr(postgrest_client, candidate, hdrs)  # In case the attribute needs explicit re-assignment
+                    except Exception:
+                        pass
+                    break
+    except Exception:
+        # Best-effort; continue
+        logger.debug("get_supabase_for_user_request: direct header assignment fallback failed.")
 
     logger.debug(
         "Supabase user client created. postgrest_auth_applied=%s",
@@ -82,8 +100,28 @@ def get_supabase_for_user_request(access_token: str) -> Client:
 
 
 # PUBLIC_INTERFACE
+def get_supabase_user_scoped(request: Optional[Request]) -> Client:
+    """Return a Supabase client configured to act as the current end user.
+
+    It extracts the access token from the incoming Request's Authorization header,
+    then sets both the GoTrue and PostgREST layers:
+
+    - client.auth.set_auth(access_token)
+    - client.postgrest.auth(access_token)
+
+    Additionally, it defensively sets the Authorization: Bearer <token> header
+    directly on the PostgREST client if the SDK variation doesn't expose .auth().
+
+    If no token is present, a generic client is returned (RLS-protected queries may fail).
+    """
+    token = get_bearer_token_from_request(request)
+    return get_supabase_for_user_request(token) if token else get_supabase()
+
+
+# PUBLIC_INTERFACE
 def get_current_user(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Optional[Request] = None,
 ) -> Dict[str, Any]:
     """FastAPI dependency to validate JWT and return current user info.
 
@@ -91,12 +129,24 @@ def get_current_user(
     1) Decode with SUPABASE_JWT_SECRET if provided.
     2) Fallback to supabase.auth.get_user(access_token) (network call).
 
+    Side-effect:
+    - Stores the raw access token on request.state.user_token if Request is available
+      so downstream helpers can reuse it.
+
     Returns a dict with at least: {"id": <user_id>, "email": <email?>}
     """
     if creds is None or not creds.scheme.lower().startswith("bearer"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
     token = creds.credentials
+
+    # Stash token on request.state for helpers if Request is available
+    try:
+        if request is not None:
+            setattr(request.state, "user_token", token)
+    except Exception:
+        pass
+
     supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
 
     # Strategy 1: local decode
@@ -129,16 +179,25 @@ def get_bearer_token_from_request(request: Optional[Request]) -> Optional[str]:
     """Extract the Bearer token from the Authorization header of a FastAPI Request.
 
     This helper is robust to header case and ensures only the token value is returned.
+    It also falls back to request.state.user_token if present (populated by get_current_user).
     Returns None if header is missing or malformed.
     """
     if not request:
         return None
+    # Primary: Authorization header
     auth_header = request.headers.get("authorization")
-    if not auth_header:
-        return None
-    if not auth_header.lower().startswith("bearer "):
-        return None
-    return auth_header.split(" ", 1)[1].strip() or None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+        if token:
+            return token
+    # Fallback: request.state.user_token if previously set by get_current_user
+    try:
+        state_token = getattr(request.state, "user_token", None)
+        if state_token:
+            return state_token
+    except Exception:
+        pass
+    return None
 
 
 # PUBLIC_INTERFACE
