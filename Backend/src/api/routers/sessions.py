@@ -69,6 +69,12 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
     """
     Create a new session for the current authenticated user.
 
+    Behavior:
+    - Backend-owned insert: we always set user_id from the authenticated JWT (sub) on the server.
+      Clients must not send user_id. This is required to satisfy Supabase RLS:
+      policy: WITH CHECK (auth.uid() = user_id).
+    - The request Authorization bearer token is forwarded to PostgREST so auth.uid() is populated.
+
     Parameters:
     - payload: SessionCreate with an optional title.
 
@@ -85,6 +91,8 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    # CRITICAL: Do NOT accept user_id from the client. RLS requires auth.uid() = user_id on insert.
+    # Always derive it from the authenticated user's token.
     to_insert = {"user_id": user_id, "title": payload.title}
     try:
         # supabase-py may not support chaining .select() after insert; rely on returned data
