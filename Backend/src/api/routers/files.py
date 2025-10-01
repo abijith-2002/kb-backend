@@ -128,7 +128,8 @@ async def upload_file(
         "size": len(data),
     }
     try:
-        iresp = sb.table("files").insert(meta).select("*").single().execute()
+        # supabase-py may not support chaining .select() after insert; rely on returned data
+        iresp = sb.table("files").insert(meta).execute()
     except Exception as e:
         # Try to roll back storage object best-effort
         try:
@@ -143,7 +144,27 @@ async def upload_file(
             )
         raise HTTPException(status_code=500, detail=f"Failed to save metadata: {e}")
 
-    row = getattr(iresp, "data", None)
+    # Normalize response shape: list (rows) or dict (single)
+    row = None
+    rows = getattr(iresp, "data", []) or []
+    if isinstance(rows, list) and rows:
+        row = rows[0]
+    elif isinstance(rows, dict) and rows:
+        row = rows
+
+    if not row:
+        # Fallback to an immediate select by unique-ish storage_path and owner
+        sel = (
+            sb.table("files")
+            .select("*")
+            .eq("user_id", user["id"])
+            .eq("storage_path", storage_path)
+            .limit(1)
+            .execute()
+        )
+        rows2 = getattr(sel, "data", []) or []
+        row = rows2[0] if rows2 else None
+
     if not row:
         raise HTTPException(status_code=500, detail="Upload succeeded but metadata response missing")
     return FileItem(**row)

@@ -87,13 +87,8 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
 
     to_insert = {"user_id": user_id, "title": payload.title}
     try:
-        insert_resp = (
-            sb.table("sessions")
-            .insert(to_insert)
-            .select("*")
-            .single()
-            .execute()
-        )
+        # supabase-py may not support chaining .select() after insert; rely on returned data
+        insert_resp = sb.table("sessions").insert(to_insert).execute()
     except Exception as e:
         msg = str(e)
         if "row level security" in msg.lower() or "rls" in msg.lower() or "permission" in msg.lower():
@@ -104,7 +99,13 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
             )
         raise HTTPException(status_code=400, detail=f"Failed to create session: {e}")
 
-    row = getattr(insert_resp, "data", None)
+    # Insert may return a list (inserted rows) or a dict (single row); normalize
+    row = None
+    rows = getattr(insert_resp, "data", []) or []
+    if isinstance(rows, list) and rows:
+        row = rows[0]
+    elif isinstance(rows, dict) and rows:
+        row = rows
     if not row:
         # Fallback read (should not be needed with .single(), but kept as safety)
         sel_resp = (
@@ -219,11 +220,21 @@ def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_cur
         .update(updates)
         .eq("id", session_id)
         .eq("user_id", user["id"])
-        .select("*")
-        .single()
         .execute()
     )
-    row = getattr(resp, "data", None)
+    rows = getattr(resp, "data", []) or []
+    row = rows[0] if isinstance(rows, list) and rows else (rows if isinstance(rows, dict) else None)
+    if not row:
+        # Fallback: fetch the updated row explicitly
+        sel = (
+            sb.table("sessions")
+            .select("*")
+            .eq("id", session_id)
+            .eq("user_id", user["id"])
+            .single()
+            .execute()
+        )
+        row = getattr(sel, "data", None)
     if not row:
         raise HTTPException(status_code=404, detail="Session not found or not updated")
     return Session(**row)
