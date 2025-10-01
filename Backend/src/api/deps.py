@@ -38,11 +38,18 @@ def get_supabase_for_user_request(access_token: str) -> Client:
     - Supabase Client with auth set to the provided user token.
     """
     client = get_supabase()
+    # Attach the user's JWT so DB/storage calls run under their identity and RLS sees auth.uid()
     try:
-        # Attach the user's JWT to the client so DB requests run under their identity
+        # GoTrue session (auth) for SDK-managed calls
         client.auth.set_auth(access_token)
     except Exception:
-        # If setting auth fails, we still return the client; DB calls may fail with RLS which our handlers surface.
+        # Ignore; may still succeed via PostgREST explicit auth
+        pass
+    try:
+        # CRITICAL: Ensure PostgREST carries the user's token so auth.uid() is populated in RLS checks
+        client.postgrest.auth(access_token)
+    except Exception:
+        # Older SDKs may not expose postgrest.auth; ignore if unavailable
         pass
     return client
 

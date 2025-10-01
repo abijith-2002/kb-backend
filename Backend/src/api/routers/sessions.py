@@ -19,12 +19,12 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
 
 def get_supabase():
-    """Create Supabase client for session routes."""
+    """Create Supabase client for session routes using service role (preferred) or anon key."""
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_ANON_KEY")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
     if not url or not key:
         raise RuntimeError(
-            "Supabase configuration missing. Ensure SUPABASE_URL and SUPABASE_ANON_KEY are set."
+            "Supabase configuration missing. Ensure SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_SERVICE_ROLE_KEY) are set."
         )
     return create_client(url, key)
 
@@ -32,8 +32,15 @@ def get_supabase():
 # ---------------------
 # List sessions
 # ---------------------
+# PUBLIC_INTERFACE
 @router.get("", response_model=SessionsList, summary="List sessions")
 def list_sessions(user=Depends(get_current_user), request: Request = None):
+    """
+    List sessions for the current authenticated user.
+
+    Returns:
+    - SessionsList: Array of session records owned by the current user.
+    """
     # Use a client that carries the user's JWT for RLS
     auth_header = request.headers.get("authorization") if request else None
     token = None
@@ -56,8 +63,18 @@ def list_sessions(user=Depends(get_current_user), request: Request = None):
 # ---------------------
 # Create session
 # ---------------------
+# PUBLIC_INTERFACE
 @router.post("", response_model=Session, status_code=201, summary="Create session")
 def create_session(payload: SessionCreate, user=Depends(get_current_user), request: Request = None):
+    """
+    Create a new session for the current authenticated user.
+
+    Parameters:
+    - payload: SessionCreate with an optional title.
+
+    Returns:
+    - Session: The newly created session record.
+    """
     auth_header = request.headers.get("authorization") if request else None
     token = None
     if auth_header and auth_header.lower().startswith("bearer "):
@@ -69,18 +86,27 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     to_insert = {"user_id": user_id, "title": payload.title}
-    print(user_id)
     try:
-        insert_resp = sb.table("sessions").insert(to_insert).execute()
-        
+        insert_resp = (
+            sb.table("sessions")
+            .insert(to_insert)
+            .select("*")
+            .single()
+            .execute()
+        )
     except Exception as e:
+        msg = str(e)
+        if "row level security" in msg.lower() or "rls" in msg.lower() or "permission" in msg.lower():
+            # Provide clearer guidance if RLS blocks the insert
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized by RLS while creating session. Ensure backend forwards user JWT to DB (postgrest.auth) and Supabase policies allow insert with auth.uid() = user_id.",
+            )
         raise HTTPException(status_code=400, detail=f"Failed to create session: {e}")
 
-    # Fetch inserted row
-    data_after_insert = getattr(insert_resp, "data", []) or []
-    if isinstance(data_after_insert, list) and data_after_insert:
-        row = data_after_insert[0]
-    else:
+    row = getattr(insert_resp, "data", None)
+    if not row:
+        # Fallback read (should not be needed with .single(), but kept as safety)
         sel_resp = (
             sb.table("sessions")
             .select("*")
@@ -101,6 +127,7 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
 # ---------------------
 # Get session by ID
 # ---------------------
+# PUBLIC_INTERFACE
 @router.get(
     "/{session_id}",
     response_model=SessionWithMessages,
@@ -111,6 +138,12 @@ def get_session(session_id: str, user=Depends(get_current_user), request: Reques
     """
     Retrieve a session by ID (owned by the current user) and include all messages
     associated with that session in chronological order.
+
+    Parameters:
+    - session_id: UUID string of the target session.
+
+    Returns:
+    - SessionWithMessages: Session and its messages.
     """
     auth_header = request.headers.get("authorization") if request else None
     token = None
@@ -155,8 +188,19 @@ def get_session(session_id: str, user=Depends(get_current_user), request: Reques
 # ---------------------
 # Update session
 # ---------------------
+# PUBLIC_INTERFACE
 @router.patch("/{session_id}", response_model=Session, summary="Update session")
 def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_current_user), request: Request = None):
+    """
+    Update a session (owned by the user). Only title is supported.
+
+    Parameters:
+    - session_id: UUID string of the session to update.
+    - payload: SessionUpdate with optional title.
+
+    Returns:
+    - Session: Updated session record.
+    """
     auth_header = request.headers.get("authorization") if request else None
     token = None
     if auth_header and auth_header.lower().startswith("bearer "):
@@ -188,8 +232,18 @@ def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_cur
 # ---------------------
 # Delete session
 # ---------------------
+# PUBLIC_INTERFACE
 @router.delete("/{session_id}", status_code=204, summary="Delete session")
 def delete_session(session_id: str, user=Depends(get_current_user), request: Request = None):
+    """
+    Delete a session owned by the current user.
+
+    Parameters:
+    - session_id: UUID string of the session to delete.
+
+    Returns:
+    - 204 No Content on success.
+    """
     auth_header = request.headers.get("authorization") if request else None
     token = None
     if auth_header and auth_header.lower().startswith("bearer "):
@@ -203,6 +257,7 @@ def delete_session(session_id: str, user=Depends(get_current_user), request: Req
 # ---------------------
 # Post message
 # ---------------------
+# PUBLIC_INTERFACE
 @router.post(
     "/{session_id}/messages",
     response_model=MessageItem,
@@ -210,6 +265,16 @@ def delete_session(session_id: str, user=Depends(get_current_user), request: Req
     summary="Post user message",
 )
 def post_message(session_id: str, payload: MessageCreate, user=Depends(get_current_user), request: Request = None):
+    """
+    Post a user message within a session. Requires that at least one file exists for this session.
+
+    Parameters:
+    - session_id: UUID string of the target session (must be owned by user).
+    - payload: MessageCreate with role='user' and non-empty content.
+
+    Returns:
+    - MessageItem: Assistant stub reply record.
+    """
     auth_header = request.headers.get("authorization") if request else None
     token = None
     if auth_header and auth_header.lower().startswith("bearer "):
