@@ -40,3 +40,23 @@ Troubleshooting:
   - Check that the session belongs to the same user (the API already enforces this).
   - Re-run the migration SQL in Supabase SQL editor to ensure policies are in place.
 
+## RLS Diagnostics (enable for deeper insight)
+
+To help identify JWT propagation or policy mismatches during development:
+
+- Set the environment variable:
+  - `DEBUG_RLS=1`
+- Or add a request header on the failing call:
+  - `X-Debug-RLS: 1`
+
+When enabled and an RLS violation occurs (e.g., on `POST /sessions`), the API returns a `detail.debug` object containing:
+
+- `insert_payload_user_id`: The user_id the backend attempted to insert.
+- `user_id_from_dependency`: The user id resolved by get_current_user.
+- `unverified_sub_from_jwt`: The `sub` claim extracted from the JWT without verification.
+- `sub_equals_user_id`: Whether `sub` matches the resolved user id.
+- `token_present`, `token_length`, `token_prefix` (first 12 chars), `token_hash` (sha256 first 12 chars): Token metadata only; no full token is returned.
+- `expected_policy`: The RLS insert policy the backend expects.
+- `supabase_debug`: Snapshot of Supabase client state (whether PostgREST Authorization header appears to be set, and basic env flags).
+
+Note: Secrets are not logged or returned. The debug snapshot is for diagnostics only and should be disabled in production.

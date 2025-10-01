@@ -1,10 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from supabase import create_client
 import os
+import logging
+import hashlib
 from datetime import datetime, timezone
 import uuid
 
-from ..deps import get_current_user
+from ..deps import (
+    get_current_user,
+    get_supabase_for_user_request,
+    get_bearer_token_from_request,
+    extract_user_id_from_token_unverified,
+    get_supabase_debug_snapshot,
+)
 from ..models import (
     SessionCreate,
     SessionUpdate,
@@ -16,6 +24,8 @@ from ..models import (
 )
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
+
+logger = logging.getLogger("kb_backend.supabase")
 
 
 def get_supabase():
@@ -42,11 +52,7 @@ def list_sessions(user=Depends(get_current_user), request: Request = None):
     - SessionsList: Array of session records owned by the current user.
     """
     # Use a client that carries the user's JWT for RLS
-    auth_header = request.headers.get("authorization") if request else None
-    token = None
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
-    from ..deps import get_supabase_for_user_request
+    token = get_bearer_token_from_request(request)
     sb = get_supabase_for_user_request(token) if token else get_supabase()
     resp = (
         sb.table("sessions")
@@ -81,11 +87,7 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
     Returns:
     - Session: The newly created session record.
     """
-    auth_header = request.headers.get("authorization") if request else None
-    token = None
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
-    from ..deps import get_supabase_for_user_request
+    token = get_bearer_token_from_request(request)
     sb = get_supabase_for_user_request(token) if token else get_supabase()
     user_id = user.get("id")
     if not user_id:
@@ -99,13 +101,61 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user), reque
         insert_resp = sb.table("sessions").insert(to_insert).execute()
     except Exception as e:
         msg = str(e)
-        if "row level security" in msg.lower() or "rls" in msg.lower() or "permission" in msg.lower():
-            # Provide clearer guidance if RLS blocks the insert
+
+        # Build rich diagnostics to help pinpoint RLS policy mismatches, token propagation errors, or id mismatches
+        debug_enabled = (
+            os.getenv("DEBUG_RLS", "").lower() in ("1", "true", "yes")
+            or (request and request.headers.get("x-debug-rls", "").strip() == "1")
+        )
+
+        # Safe token preview & hash (no secrets leak)
+        token_len = len(token) if token else None
+        token_prefix = token[:12] if token else None
+        token_hash = hashlib.sha256(token.encode()).hexdigest()[:12] if token else None
+        unverified_sub = extract_user_id_from_token_unverified(token) if token else None
+
+        debug_payload = {
+            "route": "POST /sessions",
+            "error_message": msg,
+            "insert_payload_user_id": to_insert.get("user_id"),
+            "user_id_from_dependency": user_id,
+            "unverified_sub_from_jwt": unverified_sub,
+            "sub_equals_user_id": (unverified_sub == user_id) if (unverified_sub and user_id) else None,
+            "token_present": bool(token),
+            "token_length": token_len,
+            "token_prefix": token_prefix,
+            "token_hash": token_hash,
+            "expected_policy": "sessions.insert WITH CHECK (auth.uid() = user_id)",
+            "supabase_debug": get_supabase_debug_snapshot(sb),
+        }
+
+        # Always log diagnostics on RLS-like errors; only return to client if debug is enabled
+        if any(k in msg.lower() for k in ("row level security", "rls", "permission", "policy")):
+            logger.warning("RLS violation or permission issue while creating session. Context: %s", debug_payload)
+            if debug_enabled:
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": "Unauthorized by RLS while creating session",
+                        "debug": debug_payload,
+                    },
+                )
             raise HTTPException(
                 status_code=401,
                 detail="Unauthorized by RLS while creating session. Ensure backend forwards user JWT to DB (postgrest.auth) and Supabase policies allow insert with auth.uid() = user_id.",
             )
-        raise HTTPException(status_code=400, detail=f"Failed to create session: {e}")
+        else:
+            # Non-RLS error; include limited context only if debug enabled
+            if debug_enabled:
+                logger.warning("Create session failed (non-RLS). Context: %s", debug_payload)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Failed to create session",
+                        "debug": debug_payload,
+                    },
+                )
+            raise HTTPException(status_code=400, detail=f"Failed to create session: {e}")
 
     # Insert may return a list (inserted rows) or a dict (single row); normalize
     row = None
@@ -154,11 +204,7 @@ def get_session(session_id: str, user=Depends(get_current_user), request: Reques
     Returns:
     - SessionWithMessages: Session and its messages.
     """
-    auth_header = request.headers.get("authorization") if request else None
-    token = None
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
-    from ..deps import get_supabase_for_user_request
+    token = get_bearer_token_from_request(request)
     sb = get_supabase_for_user_request(token) if token else get_supabase()
     # Fetch session ensuring ownership
     s_resp = (
@@ -210,11 +256,7 @@ def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_cur
     Returns:
     - Session: Updated session record.
     """
-    auth_header = request.headers.get("authorization") if request else None
-    token = None
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
-    from ..deps import get_supabase_for_user_request
+    token = get_bearer_token_from_request(request)
     sb = get_supabase_for_user_request(token) if token else get_supabase()
     updates = {}
     if payload.title is not None:
@@ -263,11 +305,7 @@ def delete_session(session_id: str, user=Depends(get_current_user), request: Req
     Returns:
     - 204 No Content on success.
     """
-    auth_header = request.headers.get("authorization") if request else None
-    token = None
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
-    from ..deps import get_supabase_for_user_request
+    token = get_bearer_token_from_request(request)
     sb = get_supabase_for_user_request(token) if token else get_supabase()
     sb.table("sessions").delete().eq("id", session_id).eq("user_id", user["id"]).execute()
     return
@@ -294,11 +332,7 @@ def post_message(session_id: str, payload: MessageCreate, user=Depends(get_curre
     Returns:
     - MessageItem: Assistant stub reply record.
     """
-    auth_header = request.headers.get("authorization") if request else None
-    token = None
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
-    from ..deps import get_supabase_for_user_request
+    token = get_bearer_token_from_request(request)
     sb = get_supabase_for_user_request(token) if token else get_supabase()
 
     # Validate session ownership
