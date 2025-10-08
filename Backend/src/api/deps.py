@@ -1,7 +1,7 @@
 import os
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt, JWTError
 from supabase import create_client, Client
@@ -65,3 +65,33 @@ def get_current_user(
         return {"id": user.id, "email": getattr(user, "email", None)}
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+# PUBLIC_INTERFACE
+def get_supabase_user_scoped(request: Request) -> Client:
+    """Return a Supabase client that impersonates the current end-user for DB calls.
+
+    This sets the Authorization bearer on PostgREST so RLS policies using auth.uid() evaluate
+    to the authenticated user's ID. It also sets the auth state on the client for completeness.
+    """
+    client = get_supabase()
+    # Extract bearer token from incoming request headers
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        # Caller should have already enforced auth, but guard anyway
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Authorization header")
+
+    token = auth_header.split(" ", 1)[1].strip()
+    try:
+        # Ensure both the auth and postgrest clients carry the user token
+        client.auth.set_auth(token)
+        # Newer supabase-py exposes postgrest auth to forward token
+        if hasattr(client, "postgrest") and hasattr(client.postgrest, "auth"):
+            client.postgrest.auth(token)
+        # Defensive: set header if supported (SDK variations)
+        if hasattr(client, "postgrest") and hasattr(client.postgrest, "client"):
+            headers = getattr(client.postgrest.client, "headers", None)
+            if isinstance(headers, dict):
+                headers["Authorization"] = f"Bearer {token}"
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to scope Supabase client to user: {e}")
+    return client

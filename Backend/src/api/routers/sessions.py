@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from supabase import create_client
 import os
 
-from ..deps import get_current_user
+from ..deps import get_current_user, get_supabase_user_scoped
 from ..models import SessionCreate, SessionUpdate, Session, SessionsList
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
@@ -19,9 +19,12 @@ def get_supabase():
 
 # PUBLIC_INTERFACE
 @router.get("", response_model=SessionsList, summary="List sessions", description="List all sessions for the current user.")
-def list_sessions(user=Depends(get_current_user)):
-    """List all sessions for the authenticated user, ordered by most recent."""
-    sb = get_supabase()
+def list_sessions(request: Request, user=Depends(get_current_user)):
+    """List all sessions for the authenticated user, ordered by most recent.
+
+    Uses a user-scoped Supabase client so RLS evaluates auth.uid() correctly.
+    """
+    sb = get_supabase_user_scoped(request)
     try:
         resp = (
             sb.table("sessions")
@@ -39,15 +42,17 @@ def list_sessions(user=Depends(get_current_user)):
 
 # PUBLIC_INTERFACE
 @router.post("", response_model=Session, status_code=201, summary="Create session", description="Create a new session for the current user.")
-def create_session(payload: SessionCreate, user=Depends(get_current_user)):
+def create_session(request: Request, payload: SessionCreate, user=Depends(get_current_user)):
     """Create a new session record owned by the current user.
 
     Note:
     - supabase-py (2.x) does not support chaining `.select()` or `.single()` directly after `.insert()`.
       Instead, call `.insert(...).execute()` and read the returned `.data`.
     - `.data` may be a list (multiple rows) or a dict (single row) depending on SDK version/behavior.
+
+    RLS: insert WITH CHECK (auth.uid() = user_id), so we set user_id from the validated JWT.
     """
-    sb = get_supabase()
+    sb = get_supabase_user_scoped(request)
     to_insert = {"user_id": user["id"], "title": payload.title}
 
     try:
@@ -88,9 +93,9 @@ def create_session(payload: SessionCreate, user=Depends(get_current_user)):
 
 # PUBLIC_INTERFACE
 @router.get("/{session_id}", response_model=Session, summary="Get session", description="Fetch a session by ID (must belong to current user).")
-def get_session(session_id: str, user=Depends(get_current_user)):
+def get_session(request: Request, session_id: str, user=Depends(get_current_user)):
     """Fetch a single session by ID, ensuring it belongs to the current user."""
-    sb = get_supabase()
+    sb = get_supabase_user_scoped(request)
     try:
         resp = (
             sb.table("sessions")
@@ -110,15 +115,15 @@ def get_session(session_id: str, user=Depends(get_current_user)):
 
 # PUBLIC_INTERFACE
 @router.patch("/{session_id}", response_model=Session, summary="Update session", description="Update a session's title (must belong to current user).")
-def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_current_user)):
+def update_session(request: Request, session_id: str, payload: SessionUpdate, user=Depends(get_current_user)):
     """Update the session title if provided. Returns the updated session."""
-    sb = get_supabase()
+    sb = get_supabase_user_scoped(request)
     updates = {}
     if payload.title is not None:
         updates["title"] = payload.title
     if not updates:
         # No-op; return existing if owned
-        return get_session(session_id, user)
+        return get_session(request, session_id, user)
 
     try:
         # supabase-py may not support .select().single() after update in some versions.
@@ -156,9 +161,9 @@ def update_session(session_id: str, payload: SessionUpdate, user=Depends(get_cur
 
 # PUBLIC_INTERFACE
 @router.delete("/{session_id}", status_code=204, summary="Delete session", description="Delete a session (must belong to current user).")
-def delete_session(session_id: str, user=Depends(get_current_user)):
+def delete_session(request: Request, session_id: str, user=Depends(get_current_user)):
     """Delete a session that belongs to the current user. No content is returned."""
-    sb = get_supabase()
+    sb = get_supabase_user_scoped(request)
     try:
         # Delete will respect RLS
         sb.table("sessions").delete().eq("id", session_id).eq("user_id", user["id"]).execute()
