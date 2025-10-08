@@ -33,10 +33,10 @@ To satisfy RLS policies, PostgREST must evaluate auth.uid() to the calling userâ
 - Initialize Supabase client with server-side key (service or anon).
 - Forward the access token to both the auth and postgrest sub-clients so DB calls are evaluated under the user identity.
 
-In code (already implemented in src/api/deps.py):
-- client.auth.set_auth(token)
-- client.postgrest.auth(token)
+In code (implemented in src/api/deps.py for Python SDK):
+- client.postgrest.auth(token)  -- forwards the end-user JWT to PostgREST for RLS
 - Additionally, set the Authorization header on the underlying postgrest client when available.
+- Note: Do NOT use client.auth.set_auth(token) in Python; that method does not exist on the SyncSupabaseAuthClient.
 
 Additionally:
 - On inserts to user-owned tables such as sessions, set user_id to the validated userâ€™s id from the JWT.

@@ -13,12 +13,12 @@
 ## 2) Backend Client Configuration (User-Scoped JWT Forwarding)
 Critical requirement: PostgREST must receive the end-user JWT so that auth.uid() evaluates correctly inside RLS.
 
-In FastAPI (already implemented here in src/api/deps.py):
+In FastAPI (implemented in src/api/deps.py):
 - Extract the Bearer token from the request.
-- Set user token on both Supabase auth and PostgREST:
-  - client.auth.set_auth(token)
+- Forward the user token to PostgREST (RLS identity):
   - client.postgrest.auth(token)
 - Optionally ensure Authorization header is set on the underlying PostgREST client for SDK variations.
+- Note: The Python SDK does not support client.auth.set_auth(token) on Sync clients; rely on postgrest.auth().
 
 Function reference:
 - Backend/src/api/deps.py: get_supabase_user_scoped(request)

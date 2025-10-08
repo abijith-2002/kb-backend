@@ -71,7 +71,7 @@ def get_supabase_user_scoped(request: Request) -> Client:
     """Return a Supabase client that impersonates the current end-user for DB calls.
 
     This sets the Authorization bearer on PostgREST so RLS policies using auth.uid() evaluate
-    to the authenticated user's ID. It also sets the auth state on the client for completeness.
+    to the authenticated user's ID. For supabase-py, always forward the JWT via PostgREST.
     """
     client = get_supabase()
     # Extract bearer token from incoming request headers
@@ -82,12 +82,10 @@ def get_supabase_user_scoped(request: Request) -> Client:
 
     token = auth_header.split(" ", 1)[1].strip()
     try:
-        # Ensure both the auth and postgrest clients carry the user token
-        client.auth.set_auth(token)
-        # Newer supabase-py exposes postgrest auth to forward token
-        if hasattr(client, "postgrest") and hasattr(client.postgrest, "auth"):
+        # IMPORTANT: supabase-py SyncSupabaseAuthClient has no set_auth(); to scope RLS, use PostgREST auth.
+        if hasattr(client, "postgrest") and hasattr(client.postgrest, "auth") and callable(client.postgrest.auth):
             client.postgrest.auth(token)
-        # Defensive: set header if supported (SDK variations)
+        # Defensive: also inject Authorization header on underlying postgrest client if present.
         if hasattr(client, "postgrest") and hasattr(client.postgrest, "client"):
             headers = getattr(client.postgrest.client, "headers", None)
             if isinstance(headers, dict):
